@@ -327,19 +327,33 @@ def run():
         if not sys.stdin.isatty():
             # Auto-continue in non-interactive mode (e.g. nohup).
             if existing_study.user_attrs["finished"]:
+                if settings.headless:
+                    # Headless mode: skip to post-optimization trial selection.
+                    choice = "finished_headless"
+                else:
+                    print(
+                        "[yellow]Study already finished. Run interactively to select a trial.[/]"
+                    )
+                    return
+            else:
+                choice = "continue"
                 print(
-                    "[yellow]Study already finished. Run interactively to select a trial.[/]"
+                    "[green]Auto-continuing interrupted run (non-interactive mode).[/]"
                 )
-                return
-            choice = "continue"
-            print("[green]Auto-continuing interrupted run (non-interactive mode).[/]")
         else:
             choice = prompt_select("How would you like to proceed?", choices)
 
-        if choice == "continue":
+        if choice == "continue" or choice == "finished_headless":
+            # Preserve CLI-only headless settings across checkpoint restoration.
+            headless_override = settings.headless
+            output_dir_override = settings.output_dir
+            trial_override = settings.trial
             settings = Settings.model_validate_json(
                 existing_study.user_attrs["settings"]
             )
+            settings.headless = headless_override
+            settings.output_dir = output_dir_override
+            settings.trial = trial_override
         elif choice == "restart":
             os.unlink(study_checkpoint_file)
             backend = JournalFileBackend(study_checkpoint_file, lock_obj=lock_obj)
@@ -758,6 +772,66 @@ def run():
                 "[yellow]Note that KL divergence values above 1 usually indicate significant damage to the original model's capabilities.[/]"
             )
         )
+
+        # Headless mode: auto-select trial, save, and exit.
+        if settings.headless:
+            # Select trial.
+            if settings.trial is not None:
+                candidates = [
+                    t for t in best_trials if t.user_attrs["index"] == settings.trial
+                ]
+                if not candidates:
+                    print(
+                        f"[red]Trial {settings.trial} not found among Pareto-optimal trials.[/]"
+                    )
+                    sys.exit(1)
+                selected = candidates[0]
+            else:
+                selected = best_trials[0]
+
+            print()
+            print(
+                f"[bold green]Headless mode:[/] auto-selected trial "
+                f"[bold]{selected.user_attrs['index']}[/] "
+                f"(refusals: {selected.user_attrs['refusals']}/{len(evaluator.bad_prompts)}, "
+                f"KL divergence: {selected.user_attrs['kl_divergence']:.4f})"
+            )
+
+            # Restore model.
+            print("* Resetting model...")
+            model.reset_model()
+            print("* Abliterating...")
+            model.abliterate(
+                refusal_directions,
+                selected.user_attrs["direction_index"],
+                {
+                    k: AbliterationParameters(**v)
+                    for k, v in selected.user_attrs["parameters"].items()
+                },
+            )
+
+            # Determine save path and merge strategy.
+            save_directory = settings.output_dir or "./output"
+            Path(save_directory).mkdir(parents=True, exist_ok=True)
+
+            if settings.quantization == QuantizationMethod.BNB_4BIT:
+                print("Saving LoRA adapter (quantized model)...")
+                model.model.save_pretrained(save_directory)
+                model.tokenizer.save_pretrained(save_directory)
+                print(
+                    "[yellow]Note: Quantized model saved as LoRA adapter only. "
+                    "Merge with base model before deployment.[/]"
+                )
+            else:
+                print("Saving merged model...")
+                merged_model = model.get_merged_model()
+                merged_model.save_pretrained(save_directory)
+                del merged_model
+                empty_cache()
+                model.tokenizer.save_pretrained(save_directory)
+
+            print(f"[bold green]Model saved to {save_directory}[/]")
+            return
 
         while True:
             print()
