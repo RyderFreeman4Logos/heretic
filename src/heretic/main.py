@@ -327,19 +327,34 @@ def run():
         if not sys.stdin.isatty():
             # Auto-continue in non-interactive mode (e.g. nohup).
             if existing_study.user_attrs["finished"]:
+                if settings.headless:
+                    # Headless mode: skip to post-optimization trial selection.
+                    choice = "finished_headless"
+                else:
+                    print(
+                        "[yellow]Study already finished. Run interactively to select a trial.[/]"
+                    )
+                    return
+            else:
+                choice = "continue"
                 print(
-                    "[yellow]Study already finished. Run interactively to select a trial.[/]"
+                    "[green]Auto-continuing interrupted run (non-interactive mode).[/]"
                 )
-                return
-            choice = "continue"
-            print("[green]Auto-continuing interrupted run (non-interactive mode).[/]")
         else:
             choice = prompt_select("How would you like to proceed?", choices)
 
-        if choice == "continue":
-            settings = Settings.model_validate_json(
-                existing_study.user_attrs["settings"]
-            )
+        if choice == "continue" or choice == "finished_headless":
+            # Preserve CLI-only headless settings across checkpoint restoration.
+            headless_override = settings.headless
+            output_dir_override = settings.output_dir
+            trial_override = settings.trial
+            if choice == "continue":
+                settings = Settings.model_validate_json(
+                    existing_study.user_attrs["settings"]
+                )
+            settings.headless = headless_override
+            settings.output_dir = output_dir_override
+            settings.trial = trial_override
         elif choice == "restart":
             os.unlink(study_checkpoint_file)
             backend = JournalFileBackend(study_checkpoint_file, lock_obj=lock_obj)
@@ -760,7 +775,7 @@ def run():
         )
 
         # Headless mode: auto-select trial, save, and exit.
-        if settings.headless or not sys.stdin.isatty():
+        if settings.headless:
             # Select trial.
             if settings.trial is not None:
                 candidates = [
@@ -803,6 +818,11 @@ def run():
             if settings.quantization == QuantizationMethod.BNB_4BIT:
                 print("Saving LoRA adapter (quantized model)...")
                 model.model.save_pretrained(save_directory)
+                model.tokenizer.save_pretrained(save_directory)
+                print(
+                    "[yellow]Note: Quantized model saved as LoRA adapter only. "
+                    "Merge with base model before deployment.[/]"
+                )
             else:
                 print("Saving merged model...")
                 merged_model = model.get_merged_model()
