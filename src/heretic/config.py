@@ -303,6 +303,27 @@ class Settings(BaseSettings):
         description="Benchmarks to offer to the user for evaluating abliterated models.",
     )
 
+    headless: bool = Field(
+        default=False,
+        description=(
+            "Skip interactive menus after optimization. Auto-selects the best Pareto-optimal trial "
+            "(or the trial specified by --trial) and saves it to --output-dir."
+        ),
+    )
+
+    output_dir: str | None = Field(
+        default=None,
+        description=(
+            "Directory to save the model in headless mode. "
+            "Defaults to './output/' if not specified."
+        ),
+    )
+
+    trial: int | None = Field(
+        default=None,
+        description="Trial index to select in headless mode. If not set, auto-selects the best Pareto-optimal trial.",
+    )
+
     refusal_markers: list[str] = Field(
         default=[
             "sorry",

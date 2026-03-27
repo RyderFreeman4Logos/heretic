@@ -759,6 +759,61 @@ def run():
             )
         )
 
+        # Headless mode: auto-select trial, save, and exit.
+        if settings.headless or not sys.stdin.isatty():
+            # Select trial.
+            if settings.trial is not None:
+                candidates = [
+                    t for t in best_trials if t.user_attrs["index"] == settings.trial
+                ]
+                if not candidates:
+                    print(
+                        f"[red]Trial {settings.trial} not found among Pareto-optimal trials.[/]"
+                    )
+                    sys.exit(1)
+                selected = candidates[0]
+            else:
+                selected = best_trials[0]
+
+            print()
+            print(
+                f"[bold green]Headless mode:[/] auto-selected trial "
+                f"[bold]{selected.user_attrs['index']}[/] "
+                f"(refusals: {selected.user_attrs['refusals']}/{len(evaluator.bad_prompts)}, "
+                f"KL divergence: {selected.user_attrs['kl_divergence']:.4f})"
+            )
+
+            # Restore model.
+            print("* Resetting model...")
+            model.reset_model()
+            print("* Abliterating...")
+            model.abliterate(
+                refusal_directions,
+                selected.user_attrs["direction_index"],
+                {
+                    k: AbliterationParameters(**v)
+                    for k, v in selected.user_attrs["parameters"].items()
+                },
+            )
+
+            # Determine save path and merge strategy.
+            save_directory = settings.output_dir or "./output"
+            Path(save_directory).mkdir(parents=True, exist_ok=True)
+
+            if settings.quantization == QuantizationMethod.BNB_4BIT:
+                print("Saving LoRA adapter (quantized model)...")
+                model.model.save_pretrained(save_directory)
+            else:
+                print("Saving merged model...")
+                merged_model = model.get_merged_model()
+                merged_model.save_pretrained(save_directory)
+                del merged_model
+                empty_cache()
+                model.tokenizer.save_pretrained(save_directory)
+
+            print(f"[bold green]Model saved to {save_directory}[/]")
+            return
+
         while True:
             print()
             trial = prompt_select("Which trial do you want to use?", choices)
