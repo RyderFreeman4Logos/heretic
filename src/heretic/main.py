@@ -348,10 +348,9 @@ def run():
             headless_override = settings.headless
             output_dir_override = settings.output_dir
             trial_override = settings.trial
-            if choice == "continue":
-                settings = Settings.model_validate_json(
-                    existing_study.user_attrs["settings"]
-                )
+            settings = Settings.model_validate_json(
+                existing_study.user_attrs["settings"]
+            )
             settings.headless = headless_override
             settings.output_dir = output_dir_override
             settings.trial = trial_override
