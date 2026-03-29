@@ -50,8 +50,7 @@ class PendingScore:
                 refusal_flags = self._judge_future.result(timeout=timeout)
             except TimeoutError:
                 logger.warning(
-                    "LLM judge timed out after %.1fs, falling back to substring",
-                    timeout,
+                    f"LLM judge timed out after {timeout:.1f}s, falling back to substring",
                 )
             except Exception:
                 logger.warning("Pipelined LLM judge raised", exc_info=True)
@@ -69,12 +68,7 @@ class PendingScore:
                 refusals += 1
 
             if ev.settings.print_responses:
-                prompt = ev.bad_prompts[i]
-                print()
-                print(f"[bold]System prompt:[/] {prompt.system}")
-                print(f"[bold]Prompt:[/] {prompt.user}")
-                disp = "[italic]\\[empty][/]" if not response.strip() else response
-                print(f"[bold]Response:[/] [{'red' if is_ref else 'green'}]{disp}[/]")
+                ev._print_response(ev.bad_prompts[i], response, is_ref)
 
         if ev.settings.print_responses:
             print()
@@ -111,12 +105,12 @@ class Evaluator:
         self._judge_executor = ThreadPoolExecutor(max_workers=1)
         atexit.register(self._judge_executor.shutdown, wait=False)
 
-        # Track dual baselines for score consistency across LLM judge fallback
+        # Track dual baselines for score consistency across LLM judge fallback.
         self._base_refusals_llm: int | None = None
         self._base_refusals_substring: int = 0
         self._last_used_llm_judge: bool = False
 
-        # Check LLM judge dependency upfront so users know immediately
+        # Check LLM judge dependency upfront so users know immediately.
         if settings.use_llm_judge:
             try:
                 import httpx  # noqa: F401
@@ -153,39 +147,31 @@ class Evaluator:
             skip_special_tokens=True,
         )
 
-        # Always compute substring baseline
+        # Always compute substring baseline.
         self._base_refusals_substring = sum(
             1 for r in base_responses if self.is_refusal(r)
         )
 
-        # Try LLM judge for baseline if enabled
+        # Try LLM judge for baseline if enabled.
         if settings.use_llm_judge:
             flags = self._try_llm_judge(base_responses)
             if flags is not None:
                 self._base_refusals_llm = sum(flags)
                 self.base_refusals = self._base_refusals_llm
                 logger.info(
-                    "Baseline: LLM judge=%d, substring=%d",
-                    self._base_refusals_llm,
-                    self._base_refusals_substring,
+                    f"Baseline: LLM judge={self._base_refusals_llm}, substring={self._base_refusals_substring}",
                 )
             else:
                 self.base_refusals = self._base_refusals_substring
                 logger.warning(
-                    "Baseline LLM judge failed, using substring (%d)",
-                    self.base_refusals,
+                    f"Baseline LLM judge failed, using substring ({self.base_refusals})",
                 )
         else:
             self.base_refusals = self._base_refusals_substring
 
         if self.settings.print_responses:
             for prompt, response in zip(self.bad_prompts, base_responses):
-                is_ref = self.is_refusal(response)
-                print()
-                print(f"[bold]System prompt:[/] {prompt.system}")
-                print(f"[bold]Prompt:[/] {prompt.user}")
-                disp = "[italic]\\[empty][/]" if not response.strip() else response
-                print(f"[bold]Response:[/] [{'red' if is_ref else 'green'}]{disp}[/]")
+                self._print_response(prompt, response, self.is_refusal(response))
             print()
 
         print(
@@ -200,7 +186,7 @@ class Evaluator:
             prompt_texts = [p.user for p in self.bad_prompts]
             flags = classify_refusals_batch(prompt_texts, responses)
             if flags is not None:
-                logger.info("LLM judge classified %d responses", len(flags))
+                logger.info(f"LLM judge classified {len(flags)} responses")
             else:
                 logger.warning("LLM judge returned None (all models exhausted)")
             return flags
@@ -231,42 +217,13 @@ class Evaluator:
 
         return False
 
-    def count_refusals(self) -> int:
-        responses = self.model.get_responses_batched(
-            self.bad_prompts,
-            skip_special_tokens=True,
-        )
-
-        # Try LLM judge if enabled
-        refusal_flags: list[bool] | None = None
-        if self.settings.use_llm_judge:
-            refusal_flags = self._try_llm_judge(responses)
-
-        self._last_used_llm_judge = refusal_flags is not None
-
-        refusal_count = 0
-        for i, (prompt, response) in enumerate(zip(self.bad_prompts, responses)):
-            is_refusal = (
-                refusal_flags[i]
-                if refusal_flags is not None
-                else self.is_refusal(response)
-            )
-            if is_refusal:
-                refusal_count += 1
-
-            if self.settings.print_responses:
-                print()
-                print(f"[bold]System prompt:[/] {prompt.system}")
-                print(f"[bold]Prompt:[/] {prompt.user}")
-                disp = "[italic]\\[empty][/]" if not response.strip() else response
-                print(
-                    f"[bold]Response:[/] [{'red' if is_refusal else 'green'}]{disp}[/]"
-                )
-
-        if self.settings.print_responses:
-            print()
-
-        return refusal_count
+    def _print_response(self, prompt: Prompt, response: str, is_refusal: bool) -> None:
+        """Print a single prompt/response pair when print_responses is enabled."""
+        print()
+        print(f"[bold]System prompt:[/] {prompt.system}")
+        print(f"[bold]Prompt:[/] {prompt.user}")
+        disp = "[italic]\\[empty][/]" if not response.strip() else response
+        print(f"[bold]Response:[/] [{'red' if is_refusal else 'green'}]{disp}[/]")
 
     def start_evaluation(self) -> PendingScore:
         """Run GPU work, submit LLM judge async, return pending score.
@@ -274,14 +231,14 @@ class Evaluator:
         The returned PendingScore can be resolved later (after the caller
         has started the next trial's GPU work) to get the final score.
         """
-        # GPU: generate responses for bad prompts
+        # GPU: generate responses for bad prompts.
         print("  * Counting model refusals...")
         responses = self.model.get_responses_batched(
             self.bad_prompts,
             skip_special_tokens=True,
         )
 
-        # Submit LLM judge to background thread (non-blocking)
+        # Submit LLM judge to background thread (non-blocking).
         judge_future: Future[list[bool] | None] | None = None
         if self.settings.use_llm_judge:
             judge_future = self._judge_executor.submit(
@@ -289,7 +246,7 @@ class Evaluator:
                 responses,
             )
 
-        # GPU: logprobs for good prompts (overlaps with LLM judge)
+        # GPU: logprobs for good prompts (overlaps with LLM judge).
         print("  * Obtaining first-token probability distributions...")
         logprobs = self.model.get_logprobs_batched(self.good_prompts)
         kl_divergence = F.kl_div(

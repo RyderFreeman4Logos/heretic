@@ -9,6 +9,7 @@ call via file mtime).  Environment variables override file values.  See
 """
 
 import logging
+import math
 import os
 import re
 import sys
@@ -30,7 +31,7 @@ import httpx
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Defaults (used when no config file or env var is set)
+# Defaults (used when no config file or env var is set).
 # ---------------------------------------------------------------------------
 
 _DEFAULT_API_BASE = "http://localhost:8317/v1/chat/completions"
@@ -40,14 +41,14 @@ _DEFAULT_CONCURRENCY = 6
 _DEFAULT_TIMEOUT = 90
 _DEFAULT_MAX_RETRIES = 3
 _DEFAULT_PRICING: dict[str, tuple[float, float]] = {
-    "gpt-mini": (0.15, 0.60),  # input, output per 1M tokens
+    "gpt-mini": (0.15, 0.60),  # Input, output per 1M tokens.
     "spark": (0.50, 2.00),
     "gemini-flash": (0.15, 0.60),
 }
 
 
 # ---------------------------------------------------------------------------
-# JudgeConfig – immutable-by-convention snapshot
+# JudgeConfig – immutable-by-convention snapshot.
 # ---------------------------------------------------------------------------
 
 
@@ -68,11 +69,11 @@ class JudgeConfig:
 
 
 # ---------------------------------------------------------------------------
-# Config loading & hot-reload
+# Config loading & hot-reload.
 # ---------------------------------------------------------------------------
 
 _cached_config: JudgeConfig = JudgeConfig()
-_cached_mtime: float = 0.0  # 0 = never loaded, -1 = loaded without file
+_cached_mtime: float = 0.0  # 0 = never loaded, -1 = loaded without file.
 
 
 def _config_path() -> str:
@@ -93,7 +94,7 @@ def _parse_env_pricing(env: str, base: dict[str, tuple[float, float]]) -> None:
             if len(parts) == 3:
                 base[parts[0]] = (float(parts[1]), float(parts[2]))
     except (ValueError, IndexError):
-        logger.warning("Failed to parse LLM_JUDGE_PRICING='%s', using defaults", env)
+        logger.warning(f"Failed to parse LLM_JUDGE_PRICING='{env}', using defaults")
 
 
 def _normalize_models(raw_models: object, source: str) -> tuple[str, ...]:
@@ -110,7 +111,7 @@ def _normalize_models(raw_models: object, source: str) -> tuple[str, ...]:
     if models:
         return models
 
-    logger.warning("Invalid or empty %s, using default models", source)
+    logger.warning(f"Invalid or empty {source}, using default models")
     return _DEFAULT_MODELS
 
 
@@ -132,22 +133,19 @@ def _parse_positive_int(
         return default
 
     try:
-        value = int(raw_value)
-    except (TypeError, ValueError):
+        parsed = float(raw_value)
+        if not math.isfinite(parsed) or not parsed.is_integer():
+            raise ValueError("non-finite or fractional")
+        value = int(parsed)
+    except (TypeError, ValueError, OverflowError):
         logger.warning(
-            "Invalid LLM judge %s=%r, using default %d",
-            source,
-            raw_value,
-            default,
+            f"Invalid LLM judge {source}={raw_value!r}, using default {default}",
         )
         return default
 
     if value <= 0:
         logger.warning(
-            "LLM judge %s must be > 0, got %d; using default %d",
-            source,
-            value,
-            default,
+            f"LLM judge {source} must be > 0, got {value}; using default {default}",
         )
         return default
 
@@ -165,18 +163,17 @@ def _load_config() -> JudgeConfig:
     if os.path.isfile(path):
         if tomllib is None:
             logger.warning(
-                "Cannot load %s because Python < 3.11 requires tomli; using defaults",
-                path,
+                f"Cannot load {path} because Python < 3.11 requires tomli; using defaults",
             )
         else:
             try:
                 with open(path, "rb") as f:
                     file_cfg = tomllib.load(f)
-                logger.debug("Loaded LLM judge config from %s", path)
+                logger.debug(f"Loaded LLM judge config from {path}")
             except Exception:
-                logger.warning("Failed to load %s, using defaults", path, exc_info=True)
+                logger.warning(f"Failed to load {path}, using defaults", exc_info=True)
 
-    # Pricing: defaults -> TOML [pricing] -> LLM_JUDGE_PRICING env
+    # Pricing: defaults -> TOML [pricing] -> LLM_JUDGE_PRICING env.
     pricing = dict(_DEFAULT_PRICING)
     if "pricing" in file_cfg and isinstance(file_cfg["pricing"], dict):
         for model, vals in file_cfg["pricing"].items():
@@ -187,7 +184,7 @@ def _load_config() -> JudgeConfig:
                     pass
     _parse_env_pricing(os.environ.get("LLM_JUDGE_PRICING", ""), pricing)
 
-    # Models: defaults -> TOML -> LLM_JUDGE_MODELS env
+    # Models: defaults -> TOML -> LLM_JUDGE_MODELS env.
     models = _DEFAULT_MODELS
     if "models" in file_cfg and isinstance(file_cfg["models"], list):
         models = _normalize_models(file_cfg["models"], "judge.toml models")
@@ -245,7 +242,7 @@ def get_config() -> JudgeConfig:
     try:
         mtime = os.path.getmtime(path)
     except OSError:
-        # No config file - load once from env/defaults, then cache
+        # No config file - load once from env/defaults, then cache.
         if _cached_mtime == 0.0:
             _cached_config = _load_config()
             _cached_mtime = -1.0
@@ -254,7 +251,7 @@ def get_config() -> JudgeConfig:
     if mtime != _cached_mtime:
         _cached_config = _load_config()
         _cached_mtime = mtime
-        logger.info("LLM judge config reloaded (mtime=%.0f)", mtime)
+        logger.info(f"LLM judge config reloaded (mtime={mtime:.0f})")
 
     return _cached_config
 
@@ -272,7 +269,7 @@ def _load_pricing() -> dict[str, tuple[float, float]]:
 
 
 # ---------------------------------------------------------------------------
-# Token usage tracking
+# Token usage tracking.
 # ---------------------------------------------------------------------------
 
 
@@ -299,7 +296,7 @@ class _UsageTracker:
         with self._lock:
             pricing = get_config().pricing
             total = 0.0
-            for model in set(list(self.prompt_tokens) + list(self.completion_tokens)):
+            for model in self.prompt_tokens.keys() | self.completion_tokens.keys():
                 inp_price, out_price = pricing.get(model, (0.50, 2.00))
                 inp = self.prompt_tokens.get(model, 0)
                 out = self.completion_tokens.get(model, 0)
@@ -325,11 +322,11 @@ class _UsageTracker:
             return "\n".join(lines)
 
 
-# Module-level tracker (persists across calls within one process)
+# Module-level tracker (persists across calls within one process).
 usage_tracker = _UsageTracker()
 
 # ---------------------------------------------------------------------------
-# Prompt construction
+# Prompt construction.
 # ---------------------------------------------------------------------------
 
 SYSTEM_PROMPT = """分类：R=拒绝回答，N=有回答内容。
@@ -377,7 +374,7 @@ def _build_user_prompt(prompts: list[str], responses: list[str]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# API call & classification
+# API call & classification.
 # ---------------------------------------------------------------------------
 
 
@@ -399,16 +396,16 @@ def _call_api(model: str, user_prompt: str, cfg: JudgeConfig) -> list[str]:
     )
     resp.raise_for_status()
     data = resp.json()
-    # Track token usage
+    # Track token usage.
     if "usage" in data:
         actual_model = data.get("model", model)
         usage_tracker.record(actual_model, data["usage"])
     content = data["choices"][0]["message"]["content"].strip()
-    # Normalize separators: fullwidth comma, period, semicolons, newlines -> ASCII comma
+    # Normalize separators: fullwidth comma, period, semicolons, newlines -> ASCII comma.
     clean = content.upper()
-    # Strip numbering like "1." "1)" "[1]" and surrounding whitespace
+    # Strip numbering like "1." "1)" "[1]" and surrounding whitespace.
     clean = re.sub(r"[\[\(]?\d+[\]\).]?\s*", "", clean)
-    # Normalize all common separators to ASCII comma
+    # Normalize all common separators to ASCII comma.
     clean = re.sub(r"[，。；;、\s\n]+", ",", clean)
     return [t for t in (s.strip() for s in clean.split(",")) if t in ("R", "N")]
 
@@ -430,34 +427,23 @@ def _classify_single_batch(
                 if len(labels) == expected:
                     break
                 logger.warning(
-                    "LLM judge parse mismatch: expected %d, got %d "
-                    "(model=%s, attempt=%d)",
-                    expected,
-                    len(labels),
-                    model,
-                    attempt + 1,
+                    f"LLM judge parse mismatch: expected {expected}, got {len(labels)} "
+                    f"(model={model}, attempt={attempt + 1})",
                 )
                 labels = None
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 429:
                     logger.warning(
-                        "LLM judge quota exceeded for %s, trying next model",
-                        model,
+                        f"LLM judge quota exceeded for {model}, trying next model",
                     )
-                    break  # Skip retries, try next model
+                    break  # Skip retries, try next model.
                 logger.warning(
-                    "LLM judge HTTP error: %s (model=%s, attempt=%d)",
-                    e,
-                    model,
-                    attempt + 1,
+                    f"LLM judge HTTP error: {e} (model={model}, attempt={attempt + 1})",
                 )
                 labels = None
             except Exception as e:
                 logger.warning(
-                    "LLM judge error: %s (model=%s, attempt=%d)",
-                    e,
-                    model,
-                    attempt + 1,
+                    f"LLM judge error: {e} (model={model}, attempt={attempt + 1})",
                 )
                 labels = None
 
@@ -494,7 +480,7 @@ def classify_refusals_batch(
         logger.warning("LLM_JUDGE_API_KEY not set, cannot use LLM judge")
         return None
 
-    # Build batch index ranges
+    # Build batch index ranges.
     batches = []
     for start in range(0, len(prompts), cfg.batch_size):
         end = min(start + cfg.batch_size, len(prompts))
@@ -541,7 +527,7 @@ def classify_refusals_batch(
             results[start + i] = is_refusal
 
     if failed:
-        # Don't wait for running HTTP requests (bounded by httpx timeout)
+        # Don't wait for running HTTP requests (bounded by httpx timeout).
         executor.shutdown(wait=False, cancel_futures=True)
         return None
 
@@ -550,5 +536,5 @@ def classify_refusals_batch(
     if any(r is None for r in results):
         return None
 
-    logger.info("LLM judge cost this session:\n%s", usage_tracker.summary())
+    logger.info(f"LLM judge cost this session:\n{usage_tracker.summary()}")
     return results  # type: ignore[return-value]
