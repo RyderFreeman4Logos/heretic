@@ -134,8 +134,8 @@ def _parse_positive_int(
 
     try:
         parsed = float(raw_value)
-        if not math.isfinite(parsed):
-            raise ValueError("non-finite")
+        if not math.isfinite(parsed) or not parsed.is_integer():
+            raise ValueError("non-finite or fractional")
         value = int(parsed)
     except (TypeError, ValueError, OverflowError):
         logger.warning(

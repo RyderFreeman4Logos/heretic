@@ -204,6 +204,18 @@ class TestConfig:
         assert cfg.timeout == 90
         assert cfg.concurrency == 6
 
+    def test_fractional_env_values_fall_back_to_defaults(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("LLM_JUDGE_CONFIG", "/nonexistent/judge.toml")
+        monkeypatch.setenv("LLM_JUDGE_TIMEOUT", "7.9")
+        monkeypatch.setenv("LLM_JUDGE_CONCURRENCY", "3.5")
+        _reset_config()
+
+        cfg = get_config()
+        assert cfg.timeout == 90
+        assert cfg.concurrency == 6
+
     def test_non_finite_toml_values_fall_back_to_defaults(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
