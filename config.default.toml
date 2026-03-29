@@ -86,6 +86,11 @@ full_normalization_lora_rank = 3
 winsorization_quantile = 1.0
 
 # Number of abliteration trials to run during optimization.
+# For thinking models (e.g., Qwen3.5), directional ablation can damage
+# </think> generation. More trials give the optimizer a better chance of
+# finding parameters that remove censorship while preserving thinking
+# chain integrity. Consider 300+ trials for thinking models.
+# See docs/thinking-model-compatibility.md for details.
 n_trials = 200
 
 # Number of trials that use random sampling for the purpose of exploration.
