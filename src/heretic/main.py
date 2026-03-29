@@ -643,8 +643,8 @@ def run():
         if pending is None:
             return
         pending_score, prev_trial, prev_idx = pending
-        score, kl_divergence, refusals = pending_score.resolve(timeout=timeout)
-        print(f"  * Refusals: [bold]{refusals}[/]/{len(evaluator.bad_prompts)}")
+        result = pending_score.resolve(timeout=timeout)
+        print(f"  * Refusals: [bold]{result.refusals}[/]/{len(evaluator.bad_prompts)}")
 
         elapsed_time = time.perf_counter() - start_time
         print()
@@ -657,9 +657,15 @@ def run():
             )
         print_memory_usage()
 
-        prev_trial.set_user_attr("kl_divergence", kl_divergence)
-        prev_trial.set_user_attr("refusals", refusals)
-        study.tell(prev_trial, score)
+        prev_trial.set_user_attr("kl_divergence", result.kl_divergence)
+        prev_trial.set_user_attr("refusals", result.refusals)
+        if result.thinking_completion_rate is not None:
+            prev_trial.set_user_attr(
+                "thinking_completion_rate", result.thinking_completion_rate
+            )
+            prev_trial.set_user_attr("thinking_failures", result.thinking_failures)
+            prev_trial.set_user_attr("thinking_samples", result.thinking_samples)
+        study.tell(prev_trial, result.objectives)
 
     study = optuna.create_study(
         sampler=TPESampler(
