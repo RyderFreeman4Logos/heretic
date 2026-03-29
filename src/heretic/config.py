@@ -4,7 +4,7 @@
 from enum import Enum
 from typing import Dict
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import (
     BaseSettings,
     CliSettingsSource,
@@ -437,6 +437,15 @@ class Settings(BaseSettings):
         ),
         gt=0,
     )
+
+    @model_validator(mode="after")
+    def _validate_thinking_eval(self) -> "Settings":
+        if self.thinking_eval_enabled and self.thinking_eval_prompts is None:
+            raise ValueError(
+                "thinking_eval_enabled is true but thinking_eval_prompts is not configured. "
+                "Provide a [thinking_eval_prompts] dataset or set thinking_eval_enabled = false."
+            )
+        return self
 
     @classmethod
     def settings_customise_sources(

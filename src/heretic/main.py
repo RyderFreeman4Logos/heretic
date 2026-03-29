@@ -669,8 +669,49 @@ def run():
             prev_trial.set_user_attr("thinking_samples", result.thinking_samples)
         study.tell(prev_trial, result.objectives)
 
-    # Determine study objective shape based on thinking evaluation state.
+    # Run baseline sanity check BEFORE creating the study so that the objective
+    # shape is final. This avoids the bug where a 3-objective study is created
+    # but baseline failure downgrades to 2-objective evaluations at runtime.
     thinking_eval_active = evaluator._thinking_eval_active
+    trial_thinking_prompts: list[Prompt] = []
+    thinking_eval_seed: int | None = None
+    thinking_eval_indices: list[int] | None = None
+
+    if thinking_eval_active and evaluator.thinking_prompts:
+        # Select prompt subset for baseline check.
+        seed = random.randint(0, 2**31 - 1)
+        rng = random.Random(seed)
+        indices = list(range(len(evaluator.thinking_prompts)))
+        rng.shuffle(indices)
+        n_samples = min(settings.thinking_eval_samples, len(indices))
+        selected_indices = sorted(indices[:n_samples])
+        trial_thinking_prompts = [
+            evaluator.thinking_prompts[i] for i in selected_indices
+        ]
+        thinking_eval_seed = seed
+        thinking_eval_indices = selected_indices
+        print(f"* Thinking evaluation: using {n_samples} prompts (seed={seed})")
+
+        # Baseline sanity check: evaluate thinking on the unablated model.
+        print("* Running thinking baseline sanity check...")
+        baseline_rate, baseline_failures, baseline_total = evaluator.evaluate_thinking(
+            trial_thinking_prompts
+        )
+        pct = baseline_rate * 100
+        print(
+            f"  * Baseline thinking: {baseline_total - baseline_failures}/{baseline_total} "
+            f"complete ({pct:.1f}%)"
+        )
+        if baseline_rate < 0.5:
+            print(
+                "[yellow]Warning:[/] baseline thinking completion rate is below 50%. "
+                "The unablated model may not support this thinking syntax reliably. "
+                "Disabling thinking evaluation for this run."
+            )
+            thinking_eval_active = False
+            trial_thinking_prompts = []
+
+    # Determine study objective shape AFTER baseline check is final.
     if thinking_eval_active:
         directions = [
             StudyDirection.MINIMIZE,
@@ -710,45 +751,25 @@ def run():
     study.set_user_attr("objective_names", objective_names)
     study.set_user_attr("thinking_eval_active", thinking_eval_active)
 
-    # Per-study fixed thinking prompt subset (B1): seed-shuffle once, reuse for all trials.
-    trial_thinking_prompts: list[Prompt] = []
-    if thinking_eval_active and evaluator.thinking_prompts:
+    # Persist per-study prompt subset for reproducibility (B1).
+    if thinking_eval_active and thinking_eval_seed is not None:
+        # Use stored seed if resuming an existing study.
         stored_seed = study.user_attrs.get("thinking_eval_seed")
-        if stored_seed is not None:
-            seed = stored_seed
-        else:
-            seed = random.randint(0, 2**31 - 1)
-        rng = random.Random(seed)
-        indices = list(range(len(evaluator.thinking_prompts)))
-        rng.shuffle(indices)
-        n_samples = min(settings.thinking_eval_samples, len(indices))
-        selected_indices = sorted(indices[:n_samples])
-        trial_thinking_prompts = [
-            evaluator.thinking_prompts[i] for i in selected_indices
-        ]
+        if stored_seed is not None and stored_seed != thinking_eval_seed:
+            # Re-derive subset from the stored seed for consistency.
+            rng = random.Random(stored_seed)
+            indices = list(range(len(evaluator.thinking_prompts)))
+            rng.shuffle(indices)
+            n_samples = min(settings.thinking_eval_samples, len(indices))
+            selected_indices = sorted(indices[:n_samples])
+            trial_thinking_prompts = [
+                evaluator.thinking_prompts[i] for i in selected_indices
+            ]
+            thinking_eval_seed = stored_seed
+            thinking_eval_indices = selected_indices
 
-        study.set_user_attr("thinking_eval_seed", seed)
-        study.set_user_attr("thinking_eval_prompt_indices", selected_indices)
-        print(f"* Thinking evaluation: using {n_samples} prompts (seed={seed})")
-
-        # Baseline sanity check: evaluate thinking on the unablated model.
-        print("* Running thinking baseline sanity check...")
-        baseline_rate, baseline_failures, baseline_total = evaluator.evaluate_thinking(
-            trial_thinking_prompts
-        )
-        pct = baseline_rate * 100
-        print(
-            f"  * Baseline thinking: {baseline_total - baseline_failures}/{baseline_total} "
-            f"complete ({pct:.1f}%)"
-        )
-        if baseline_rate < 0.5:
-            print(
-                "[yellow]Warning:[/] baseline thinking completion rate is below 50%. "
-                "The unablated model may not support this thinking syntax reliably. "
-                "Disabling thinking evaluation for this run."
-            )
-            thinking_eval_active = False
-            trial_thinking_prompts = []
+        study.set_user_attr("thinking_eval_seed", thinking_eval_seed)
+        study.set_user_attr("thinking_eval_prompt_indices", thinking_eval_indices)
 
     def count_completed_trials() -> int:
         # Count number of complete trials to compute trials to run.
@@ -909,9 +930,21 @@ def run():
                     rate, failures, total = evaluator.evaluate_thinking(
                         evaluator.thinking_prompts
                     )
+                    # FrozenTrial.set_user_attr() only modifies the in-memory
+                    # copy; persist via storage so results survive across runs.
                     trial.set_user_attr("thinking_stress_completion_rate", rate)
                     trial.set_user_attr("thinking_stress_failures", failures)
                     trial.set_user_attr("thinking_stress_samples", total)
+                    storage = study._storage
+                    storage.set_trial_user_attr(
+                        trial._trial_id, "thinking_stress_completion_rate", rate
+                    )
+                    storage.set_trial_user_attr(
+                        trial._trial_id, "thinking_stress_failures", failures
+                    )
+                    storage.set_trial_user_attr(
+                        trial._trial_id, "thinking_stress_samples", total
+                    )
                     completed = total - failures
                     pct = rate * 100
                     print(f"  * Trial {idx}: {completed}/{total} complete ({pct:.1f}%)")
