@@ -44,6 +44,16 @@ def get_model_class(
         return AutoModelForCausalLM
 
 
+@dataclass(frozen=True)
+class ThinkingProfile:
+    """Describes a model's thinking syntax for chain-completion evaluation."""
+
+    name: str
+    opening_marker: str
+    completion_marker: str
+    suppressed_prefix: str
+
+
 @dataclass
 class AbliterationParameters:
     max_weight: float
@@ -60,6 +70,7 @@ class Model:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.response_prefix = ""
+        self.thinking_profile: ThinkingProfile | None = None
         self.needs_reload = False
 
         print()

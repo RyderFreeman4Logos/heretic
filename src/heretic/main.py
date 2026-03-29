@@ -53,7 +53,7 @@ from rich.traceback import install
 from .analyzer import Analyzer
 from .config import QuantizationMethod, Settings
 from .evaluator import Evaluator, PendingScore
-from .model import AbliterationParameters, Model, get_model_class
+from .model import AbliterationParameters, Model, ThinkingProfile, get_model_class
 from .utils import (
     empty_cache,
     format_duration,
@@ -143,6 +143,42 @@ def obtain_merge_strategy(settings: Settings) -> str | None:
         return strategy
     else:
         return "merge"
+
+
+def detect_thinking_profile(prefix: str) -> ThinkingProfile | None:
+    """Detect a known thinking syntax from a common response prefix."""
+    if prefix.startswith("<think>"):
+        return ThinkingProfile(
+            name="think",
+            opening_marker="<think>",
+            completion_marker="</think>",
+            suppressed_prefix="<think></think>",
+        )
+    if prefix.startswith("<|channel|>analysis<|message|>"):
+        return ThinkingProfile(
+            name="gpt-oss",
+            opening_marker="<|channel|>analysis<|message|>",
+            completion_marker="<|end|><|start|>assistant<|channel|>final<|message|>",
+            suppressed_prefix=(
+                "<|channel|>analysis<|message|>"
+                "<|end|><|start|>assistant<|channel|>final<|message|>"
+            ),
+        )
+    if prefix.startswith("<thought>"):
+        return ThinkingProfile(
+            name="thought",
+            opening_marker="<thought>",
+            completion_marker="</thought>",
+            suppressed_prefix="<thought></thought>",
+        )
+    if prefix.startswith("[THINK]"):
+        return ThinkingProfile(
+            name="think-bracket",
+            opening_marker="[THINK]",
+            completion_marker="[/THINK]",
+            suppressed_prefix="[THINK][/THINK]",
+        )
+    return None
 
 
 def run():
@@ -442,26 +478,15 @@ def run():
     # a space, which would result in an uncommon tokenization.
     model.response_prefix = commonprefix(responses).rstrip(" ")
 
-    # Suppress CoT output.
+    # Detect thinking profile and suppress CoT output.
     recheck_prefix = False
     if model.response_prefix:
-        # When using any of the predefined prefixes below, we need to check that
-        # the prefix is actually complete (e.g. not missing a trailing newline).
-        recheck_prefix = True
-        if model.response_prefix.startswith("<think>"):
-            # Most thinking models.
-            model.response_prefix = "<think></think>"
-        elif model.response_prefix.startswith("<|channel|>analysis<|message|>"):
-            # gpt-oss.
-            model.response_prefix = "<|channel|>analysis<|message|><|end|><|start|>assistant<|channel|>final<|message|>"
-        elif model.response_prefix.startswith("<thought>"):
-            # Unknown, suggested by user.
-            model.response_prefix = "<thought></thought>"
-        elif model.response_prefix.startswith("[THINK]"):
-            # Unknown, suggested by user.
-            model.response_prefix = "[THINK][/THINK]"
-        else:
-            recheck_prefix = False
+        profile = detect_thinking_profile(model.response_prefix)
+        if profile is not None:
+            model.thinking_profile = profile
+            model.response_prefix = profile.suppressed_prefix
+            # Recheck: the predefined prefix may be missing a trailing newline.
+            recheck_prefix = True
 
     if model.response_prefix:
         print(f"* Prefix found: [bold]{model.response_prefix!r}[/]")
@@ -475,6 +500,12 @@ def run():
         if additional_prefix:
             model.response_prefix += additional_prefix
             print(f"* Extended prefix found: [bold]{model.response_prefix!r}[/]")
+
+    if settings.thinking_eval_enabled and model.thinking_profile is None:
+        print(
+            "[yellow]Warning:[/] thinking_eval_enabled is true but no supported "
+            "thinking prefix was detected. Thinking evaluation will be skipped."
+        )
 
     evaluator = Evaluator(settings, model)
 

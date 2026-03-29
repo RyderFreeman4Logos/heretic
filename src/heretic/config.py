@@ -412,6 +412,32 @@ class Settings(BaseSettings):
         description="Dataset of prompts that tend to result in refusals (used for evaluating model performance).",
     )
 
+    thinking_eval_enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable thinking chain completion evaluation as a third optimization objective. "
+            "Requires a dedicated reasoning prompt dataset (thinking_eval_prompts). "
+            "Only activates for models with a supported thinking prefix."
+        ),
+    )
+
+    thinking_eval_prompts: DatasetSpecification | None = Field(
+        default=None,
+        description=(
+            "Dataset of reasoning prompts for evaluating thinking chain completion. "
+            "Required when thinking_eval_enabled is true."
+        ),
+    )
+
+    thinking_eval_samples: int = Field(
+        default=10,
+        description=(
+            "Number of thinking prompts to evaluate per trial during optimization. "
+            "The full dataset is used for post-optimization stress testing."
+        ),
+        gt=0,
+    )
+
     @classmethod
     def settings_customise_sources(
         cls,
