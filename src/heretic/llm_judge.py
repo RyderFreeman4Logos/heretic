@@ -9,6 +9,7 @@ call via file mtime).  Environment variables override file values.  See
 """
 
 import logging
+import math
 import os
 import re
 import sys
@@ -132,8 +133,11 @@ def _parse_positive_int(
         return default
 
     try:
-        value = int(float(raw_value))
-    except (TypeError, ValueError):
+        parsed = float(raw_value)
+        if not math.isfinite(parsed):
+            raise ValueError("non-finite")
+        value = int(parsed)
+    except (TypeError, ValueError, OverflowError):
         logger.warning(
             f"Invalid LLM judge {source}={raw_value!r}, using default {default}",
         )

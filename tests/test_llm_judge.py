@@ -192,6 +192,32 @@ class TestConfig:
         assert cfg.timeout == 90
         assert cfg.max_retries == 3
 
+    def test_non_finite_env_values_fall_back_to_defaults(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("LLM_JUDGE_CONFIG", "/nonexistent/judge.toml")
+        monkeypatch.setenv("LLM_JUDGE_TIMEOUT", "inf")
+        monkeypatch.setenv("LLM_JUDGE_CONCURRENCY", "1e309")
+        _reset_config()
+
+        cfg = get_config()
+        assert cfg.timeout == 90
+        assert cfg.concurrency == 6
+
+    def test_non_finite_toml_values_fall_back_to_defaults(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        toml_file = tmp_path / "judge.toml"
+        toml_file.write_text("timeout = inf\nconcurrency = nan\n")
+        monkeypatch.setenv("LLM_JUDGE_CONFIG", str(toml_file))
+        monkeypatch.delenv("LLM_JUDGE_TIMEOUT", raising=False)
+        monkeypatch.delenv("LLM_JUDGE_CONCURRENCY", raising=False)
+        _reset_config()
+
+        cfg = get_config()
+        assert cfg.timeout == 90
+        assert cfg.concurrency == 6
+
     def test_toml_loading(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
