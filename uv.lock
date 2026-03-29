@@ -947,6 +947,7 @@ dependencies = [
     { name = "pydantic-settings" },
     { name = "questionary" },
     { name = "rich" },
+    { name = "tqdm" },
     { name = "transformers" },
 ]
 
@@ -994,6 +995,7 @@ requires-dist = [
     { name = "questionary", specifier = "~=2.1" },
     { name = "rich", specifier = "~=14.3" },
     { name = "scikit-learn", marker = "extra == 'research'", specifier = "~=1.7" },
+    { name = "tqdm", specifier = "~=4.67" },
     { name = "transformers", specifier = "~=5.3" },
 ]
 provides-extras = ["llm-judge", "research"]
