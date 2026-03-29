@@ -179,3 +179,24 @@ column = "text"
 dataset = "mlabonne/harmful_behaviors"
 split = "test[:100]"
 column = "text"
+
+# ── Thinking chain evaluation (opt-in) ──────────────────────────────────
+# Enable thinking chain completion as a third optimization objective.
+# Only activates for models with a supported thinking prefix (<think>,
+# <thought>, [THINK], <|channel|>analysis).
+# Requires a dedicated reasoning prompt dataset (thinking_eval_prompts).
+thinking_eval_enabled = false
+
+# Number of thinking prompts to evaluate per trial during optimization.
+# The full dataset is used for the post-optimization stress test on
+# Pareto-optimal trials. 10 is usually sufficient for the optimizer;
+# increase only if Pareto-front trials cluster at 0.8/0.9/1.0.
+thinking_eval_samples = 10
+
+# Dataset of reasoning prompts for thinking chain evaluation.
+# Uncomment and configure when thinking_eval_enabled = true.
+# Use prompts that require multi-step reasoning (math, logic, planning).
+# [thinking_eval_prompts]
+# dataset = "your-org/reasoning-prompts"
+# split = "train[:100]"
+# column = "text"

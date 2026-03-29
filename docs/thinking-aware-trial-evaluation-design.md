@@ -320,27 +320,27 @@ Deferred:
 
 ## Implementation Plan
 
-- [ ] [Main] Add `ThinkingProfile` detection and configuration plumbing across `main.py`, `model.py`, and `config.py`.
+- [x] [Main] Add `ThinkingProfile` detection and configuration plumbing across `main.py`, `model.py`, and `config.py`.
   Context: The evaluator cannot decide whether to run a thinking pass unless the prefix-detection result and the dedicated prompt dataset configuration are both available through stable interfaces.
   Dependencies: None.
   DONE WHEN: `Settings` exposes the new fields, prefix detection returns `ThinkingProfile | None`, and non-thinking models still behave exactly as before when the feature is disabled.
 
-- [ ] [Main] Replace tuple-based evaluation results with `TrialEvaluation` and add the secondary thinking pass in `evaluator.py`.
+- [x] [Main] Replace tuple-based evaluation results with `TrialEvaluation` and add the secondary thinking pass in `evaluator.py`.
   Context: Dynamic objective counts and raw metric reporting are awkward and fragile with positional tuples. A named result object keeps the evaluator understandable and makes the thinking pass easy to test in isolation.
   Dependencies: The configuration plumbing and thinking-profile detection must exist first.
   DONE WHEN: `Evaluator.start_evaluation()` can return a two-objective or three-objective `TrialEvaluation`, and thinking metrics are populated only when the feature is active.
 
-- [ ] [Main] Generalize study creation, resume validation, trial bookkeeping, and Pareto extraction in `main.py`.
+- [x] [Main] Generalize study creation, resume validation, trial bookkeeping, and Pareto extraction in `main.py`.
   Context: The optimization loop, checkpoint continuation path, and headless selection currently assume exactly two objectives and exactly two raw metrics.
   Dependencies: `TrialEvaluation` must exist so `main.py` can store raw metrics without tuple unpacking ambiguity.
   DONE WHEN: Two-objective studies still run unchanged, three-objective studies persist thinking metrics, and objective-shape mismatches abort resume safely.
 
-- [ ] [Main] Add the post-optimization thinking stress test and surface the results in interactive and headless flows.
+- [x] [Main] Add the post-optimization thinking stress test and surface the results in interactive and headless flows.
   Context: The per-trial sample is intentionally small, so final trial acceptance needs a stronger signal before save, upload, or deployment decisions.
   Dependencies: Generic Pareto extraction and the thinking evaluation helper must already work.
   DONE WHEN: Every Pareto-optimal trial receives stress-test attributes when thinking evaluation is active, and the selection UI displays them.
 
-- [ ] [Main] Document the feature in `config.default.toml` and `docs/thinking-model-compatibility.md`.
+- [x] [Main] Document the feature in `config.default.toml` and `docs/thinking-model-compatibility.md`.
   Context: Users need to know that the feature is opt-in, requires a dedicated reasoning prompt dataset, and may need a higher `max_response_length` or trial count for good results.
   Dependencies: Final field names and activation behavior must be stable.
   DONE WHEN: The default config includes the new fields with explanatory comments, and the compatibility doc no longer describes thinking-aware evaluation as only a planned idea.

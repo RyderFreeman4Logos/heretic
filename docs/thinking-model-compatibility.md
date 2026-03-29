@@ -30,19 +30,34 @@ The mitigations below reduce think-loop probability **without weakening censorsh
 
 > **Note on conservative ablation parameters**: Raising `kl_divergence_target` or lowering `winsorization_quantile` will reduce thinking damage, but at the cost of weaker censorship removal. This is a direct tradeoff, not a free improvement — users who need strong censorship removal are better served by disabling native thinking and using external CoT orchestration instead. These parameters are therefore not listed as recommended mitigations.
 
-### 1. Thinking-aware trial evaluation (recommended, planned)
+### 1. Thinking-aware trial evaluation (recommended, implemented)
 
-Currently, Heretic suppresses CoT during evaluation (`main.py` forces `<think></think>` prefix), so the optimizer is completely blind to thinking damage. Adding thinking chain integrity as an evaluation signal lets Optuna actively avoid parameter regions that break `</think>` generation — without reducing ablation strength.
+Heretic can optionally add thinking chain integrity as a **third optimization objective** alongside KL divergence and refusal count. This lets Optuna actively avoid parameter regions that break `</think>` generation — without reducing ablation strength.
 
 **How it works**:
 
-- During each trial's evaluation, generate a small batch (5-10 prompts) of responses **with thinking enabled**
-- Compute `thinking_completion_rate = (responses with proper </think> closure) / total`
-- Use this as a penalty term or third optimization objective
+- Set `thinking_eval_enabled = true` in `config.toml` and provide a `[thinking_eval_prompts]` dataset of reasoning prompts
+- During each trial's evaluation, a secondary GPU pass generates responses **with thinking enabled** (`skip_special_tokens=False`, response prefix cleared)
+- `thinking_completion_rate = (responses with proper closure marker) / total` becomes the third minimized objective (`1 - rate`)
+- After optimization, Pareto-optimal trials are stress-tested against the full thinking prompt dataset
 
 **Effect**: Not all parameter combinations damage thinking equally. This guides Optuna toward trials that remove censorship effectively while preserving thinking chain integrity. Expected reduction: 40% → 10-15% loop rate.
 
-**Current status**: Requires modifying `evaluator.py` to run a secondary evaluation pass with thinking enabled. Planned for implementation.
+**Activation**: The feature is opt-in, disabled by default. It only activates when a supported thinking profile is detected (`<think>`, `<thought>`, `[THINK]`, `<|channel|>analysis`). A baseline sanity check runs before optimization — if the unablated model scores below 50% thinking completion, the feature auto-disables with a warning.
+
+**Configuration** (in `config.toml`):
+
+```toml
+thinking_eval_enabled = true
+thinking_eval_samples = 10  # per trial; full dataset used for stress test
+
+[thinking_eval_prompts]
+dataset = "your-org/reasoning-prompts"
+split = "train[:100]"
+column = "text"
+```
+
+See `config.default.toml` for all options and `docs/thinking-aware-trial-evaluation-design.md` for the full design rationale.
 
 ### 2. Increased trial count (safe, immediate)
 
@@ -83,7 +98,7 @@ After optimization, before accepting a trial for production use, run a dedicated
 
 This does not change the ablation itself, but lets you **reject bad trials** before deployment. Trials with loop rate > N% (choose your threshold) should be discarded even if their KL/refusal scores look good.
 
-**Implementation note**: This is currently manual. A future Heretic feature could automate this as a post-optimization validation step.
+**Implementation note**: When `thinking_eval_enabled = true`, Heretic automatically runs this stress test on the top-5 Pareto-optimal trials after optimization completes. Results are displayed in the trial selection menu and stored as trial attributes for headless mode.
 
 ## Inference Phase: Deployment Strategies
 
@@ -186,9 +201,8 @@ With local inference (user's own hardware), latency tolerance is typically high 
 
 ## Current Status
 
-- **Heretic core**: No thinking-aware evaluation yet. CoT is suppressed during optimization.
-- **This fork**: Investigating thinking-aware trial evaluation and post-ablation stress testing.
-- **Upstream (p-e-w/heretic)**: Classified as out-of-scope / fundamental limitation ([#253](https://github.com/p-e-w/heretic/issues/253)).
+- **This fork**: Thinking-aware trial evaluation and post-optimization stress testing are implemented. Enable via `thinking_eval_enabled = true` in `config.toml`. See `docs/thinking-aware-trial-evaluation-design.md` for the full design document.
+- **Heretic core (p-e-w/heretic)**: Classified as out-of-scope / fundamental limitation ([#253](https://github.com/p-e-w/heretic/issues/253)).
 
 ## References
 
