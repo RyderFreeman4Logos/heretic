@@ -875,6 +875,47 @@ def run():
             )
         )
 
+        # Post-optimization stress test: run full thinking eval on top-K Pareto trials.
+        if thinking_eval_active and evaluator.thinking_prompts and best_trials:
+            # Only stress-test the top-K candidates to limit GPU cost.
+            top_k = min(5, len(best_trials))
+            stress_candidates = best_trials[:top_k]
+
+            # Skip trials that already have stress-test results (from prior runs).
+            untested = [
+                t
+                for t in stress_candidates
+                if "thinking_stress_completion_rate" not in t.user_attrs
+            ]
+
+            if untested:
+                print()
+                print(
+                    f"Running thinking stress test on {len(untested)} "
+                    f"Pareto-optimal trial(s)..."
+                )
+                for trial in untested:
+                    idx = trial.user_attrs["index"]
+                    print(f"  * Rebuilding trial {idx}...")
+                    model.reset_model()
+                    model.abliterate(
+                        refusal_directions,
+                        trial.user_attrs["direction_index"],
+                        {
+                            k: AbliterationParameters(**v)
+                            for k, v in trial.user_attrs["parameters"].items()
+                        },
+                    )
+                    rate, failures, total = evaluator.evaluate_thinking(
+                        evaluator.thinking_prompts
+                    )
+                    trial.set_user_attr("thinking_stress_completion_rate", rate)
+                    trial.set_user_attr("thinking_stress_failures", failures)
+                    trial.set_user_attr("thinking_stress_samples", total)
+                    completed = total - failures
+                    pct = rate * 100
+                    print(f"  * Trial {idx}: {completed}/{total} complete ({pct:.1f}%)")
+
         def _trial_label(trial: Trial) -> str:
             label = (
                 f"[Trial {trial.user_attrs['index']:>3}] "
