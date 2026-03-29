@@ -6,6 +6,7 @@ from __future__ import annotations
 import atexit
 import logging
 from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError
+from dataclasses import dataclass
 
 import torch.nn.functional as F
 from torch import Tensor
@@ -17,6 +18,18 @@ from .utils import Prompt, load_prompts, print
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class TrialEvaluation:
+    """Structured result from a single trial evaluation."""
+
+    objectives: tuple[float, ...]
+    kl_divergence: float
+    refusals: int
+    thinking_completion_rate: float | None = None
+    thinking_failures: int | None = None
+    thinking_samples: int = 0
+
+
 class PendingScore:
     """Holds GPU results and a background LLM judge future for pipelined evaluation."""
 
@@ -26,16 +39,20 @@ class PendingScore:
         kl_divergence: float,
         responses: list[str],
         judge_future: Future[list[bool] | None] | None,
+        thinking_completion_rate: float | None = None,
+        thinking_failures: int | None = None,
+        thinking_samples: int = 0,
     ) -> None:
         self._evaluator = evaluator
         self.kl_divergence = kl_divergence
         self._responses = responses
         self._judge_future = judge_future
+        self._thinking_completion_rate = thinking_completion_rate
+        self._thinking_failures = thinking_failures
+        self._thinking_samples = thinking_samples
 
-    def resolve(
-        self, timeout: float | None = None
-    ) -> tuple[tuple[float, float], float, int]:
-        """Block until LLM judge completes and compute final score.
+    def resolve(self, timeout: float | None = None) -> TrialEvaluation:
+        """Block until LLM judge completes and compute final evaluation.
 
         Args:
             timeout: Maximum seconds to wait for the LLM judge future.
@@ -87,8 +104,22 @@ class PendingScore:
         else:
             kld_score = refusals_score * kl_target / kl_scale
 
-        score = (kld_score, refusals_score)
-        return score, self.kl_divergence, refusals
+        # Build objective tuple: 2 objectives baseline, optional 3rd for thinking.
+        objectives: tuple[float, ...]
+        if self._thinking_completion_rate is not None:
+            thinking_incompletion = 1.0 - self._thinking_completion_rate
+            objectives = (kld_score, refusals_score, thinking_incompletion)
+        else:
+            objectives = (kld_score, refusals_score)
+
+        return TrialEvaluation(
+            objectives=objectives,
+            kl_divergence=self.kl_divergence,
+            refusals=refusals,
+            thinking_completion_rate=self._thinking_completion_rate,
+            thinking_failures=self._thinking_failures,
+            thinking_samples=self._thinking_samples,
+        )
 
 
 class Evaluator:
@@ -178,6 +209,31 @@ class Evaluator:
             f"* Initial refusals: [bold]{self.base_refusals}[/]/{len(self.bad_prompts)}"
         )
 
+        # Load thinking evaluation prompts when the feature is active.
+        self.thinking_prompts: list[Prompt] = []
+        self._thinking_eval_active = (
+            settings.thinking_eval_enabled
+            and settings.thinking_eval_prompts is not None
+            and model.thinking_profile is not None
+        )
+        if self._thinking_eval_active:
+            assert settings.thinking_eval_prompts is not None
+            print()
+            print(
+                f"Loading thinking evaluation prompts from "
+                f"[bold]{settings.thinking_eval_prompts.dataset}[/]..."
+            )
+            self.thinking_prompts = load_prompts(
+                settings, settings.thinking_eval_prompts
+            )
+            print(f"* [bold]{len(self.thinking_prompts)}[/] prompts loaded")
+            if not self.thinking_prompts:
+                print(
+                    "[yellow]Warning:[/] thinking prompt dataset is empty. "
+                    "Thinking evaluation will be skipped."
+                )
+                self._thinking_eval_active = False
+
     def _try_llm_judge(self, responses: list[str]) -> list[bool] | None:
         """Attempt LLM judge classification. Returns None on failure."""
         try:
@@ -225,11 +281,50 @@ class Evaluator:
         disp = "[italic]\\[empty][/]" if not response.strip() else response
         print(f"[bold]Response:[/] [{'red' if is_refusal else 'green'}]{disp}[/]")
 
-    def start_evaluation(self) -> PendingScore:
+    def evaluate_thinking(self, prompts: list[Prompt]) -> tuple[float, int, int]:
+        """Run a thinking chain completion pass and return (rate, failures, samples).
+
+        Temporarily clears model.response_prefix so the model generates with its
+        native thinking syntax, then restores the original prefix in a finally guard.
+        """
+        profile = self.model.thinking_profile
+        assert profile is not None
+
+        original_prefix = self.model.response_prefix
+        try:
+            self.model.response_prefix = ""
+            responses = self.model.get_responses_batched(
+                prompts, skip_special_tokens=False
+            )
+        finally:
+            self.model.response_prefix = original_prefix
+
+        failures = 0
+        for response in responses:
+            if not response.strip():
+                failures += 1
+                continue
+            open_pos = response.find(profile.opening_marker)
+            close_pos = response.find(profile.completion_marker)
+            if open_pos < 0 or close_pos < 0 or close_pos <= open_pos:
+                failures += 1
+
+        total = len(prompts)
+        rate = (total - failures) / total if total > 0 else 0.0
+        return rate, failures, total
+
+    def start_evaluation(
+        self,
+        thinking_prompts: list[Prompt] | None = None,
+    ) -> PendingScore:
         """Run GPU work, submit LLM judge async, return pending score.
 
         The returned PendingScore can be resolved later (after the caller
         has started the next trial's GPU work) to get the final score.
+
+        Args:
+            thinking_prompts: Subset of thinking prompts for this trial.
+                              Pass None to skip thinking evaluation.
         """
         # GPU: generate responses for bad prompts.
         print("  * Counting model refusals...")
@@ -257,11 +352,35 @@ class Evaluator:
         ).item()
         print(f"  * KL divergence: [bold]{kl_divergence:.4f}[/]")
 
-        return PendingScore(self, kl_divergence, responses, judge_future)
+        # GPU: secondary thinking pass (serial, but LLM judge runs in parallel).
+        thinking_rate: float | None = None
+        thinking_failures: int | None = None
+        thinking_samples = 0
+        if thinking_prompts:
+            print("  * Evaluating thinking chain completion...")
+            thinking_rate, thinking_failures, thinking_samples = self.evaluate_thinking(
+                thinking_prompts
+            )
+            pct = thinking_rate * 100
+            completed = thinking_samples - thinking_failures
+            print(
+                f"  * Thinking evaluation: {completed}/{thinking_samples} "
+                f"complete ({pct:.1f}%)"
+            )
 
-    def get_score(self) -> tuple[tuple[float, float], float, int]:
+        return PendingScore(
+            self,
+            kl_divergence,
+            responses,
+            judge_future,
+            thinking_completion_rate=thinking_rate,
+            thinking_failures=thinking_failures,
+            thinking_samples=thinking_samples,
+        )
+
+    def get_score(self) -> TrialEvaluation:
         """Synchronous evaluation (backward compatible)."""
         pending = self.start_evaluation()
-        score, kl_divergence, refusals = pending.resolve()
-        print(f"  * Refusals: [bold]{refusals}[/]/{len(self.bad_prompts)}")
-        return score, kl_divergence, refusals
+        result = pending.resolve()
+        print(f"  * Refusals: [bold]{result.refusals}[/]/{len(self.bad_prompts)}")
+        return result

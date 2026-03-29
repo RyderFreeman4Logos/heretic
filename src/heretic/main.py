@@ -12,6 +12,7 @@ patch_tqdm()
 import logging
 import math
 import os
+import random
 import sys
 import time
 import warnings
@@ -53,8 +54,9 @@ from rich.traceback import install
 from .analyzer import Analyzer
 from .config import QuantizationMethod, Settings
 from .evaluator import Evaluator, PendingScore
-from .model import AbliterationParameters, Model, get_model_class
+from .model import AbliterationParameters, Model, ThinkingProfile, get_model_class
 from .utils import (
+    Prompt,
     empty_cache,
     format_duration,
     get_readme_intro,
@@ -143,6 +145,42 @@ def obtain_merge_strategy(settings: Settings) -> str | None:
         return strategy
     else:
         return "merge"
+
+
+def detect_thinking_profile(prefix: str) -> ThinkingProfile | None:
+    """Detect a known thinking syntax from a common response prefix."""
+    if prefix.startswith("<think>"):
+        return ThinkingProfile(
+            name="think",
+            opening_marker="<think>",
+            completion_marker="</think>",
+            suppressed_prefix="<think></think>",
+        )
+    if prefix.startswith("<|channel|>analysis<|message|>"):
+        return ThinkingProfile(
+            name="gpt-oss",
+            opening_marker="<|channel|>analysis<|message|>",
+            completion_marker="<|end|><|start|>assistant<|channel|>final<|message|>",
+            suppressed_prefix=(
+                "<|channel|>analysis<|message|>"
+                "<|end|><|start|>assistant<|channel|>final<|message|>"
+            ),
+        )
+    if prefix.startswith("<thought>"):
+        return ThinkingProfile(
+            name="thought",
+            opening_marker="<thought>",
+            completion_marker="</thought>",
+            suppressed_prefix="<thought></thought>",
+        )
+    if prefix.startswith("[THINK]"):
+        return ThinkingProfile(
+            name="think-bracket",
+            opening_marker="[THINK]",
+            completion_marker="[/THINK]",
+            suppressed_prefix="[THINK][/THINK]",
+        )
+    return None
 
 
 def run():
@@ -442,26 +480,15 @@ def run():
     # a space, which would result in an uncommon tokenization.
     model.response_prefix = commonprefix(responses).rstrip(" ")
 
-    # Suppress CoT output.
+    # Detect thinking profile and suppress CoT output.
     recheck_prefix = False
     if model.response_prefix:
-        # When using any of the predefined prefixes below, we need to check that
-        # the prefix is actually complete (e.g. not missing a trailing newline).
-        recheck_prefix = True
-        if model.response_prefix.startswith("<think>"):
-            # Most thinking models.
-            model.response_prefix = "<think></think>"
-        elif model.response_prefix.startswith("<|channel|>analysis<|message|>"):
-            # gpt-oss.
-            model.response_prefix = "<|channel|>analysis<|message|><|end|><|start|>assistant<|channel|>final<|message|>"
-        elif model.response_prefix.startswith("<thought>"):
-            # Unknown, suggested by user.
-            model.response_prefix = "<thought></thought>"
-        elif model.response_prefix.startswith("[THINK]"):
-            # Unknown, suggested by user.
-            model.response_prefix = "[THINK][/THINK]"
-        else:
-            recheck_prefix = False
+        profile = detect_thinking_profile(model.response_prefix)
+        if profile is not None:
+            model.thinking_profile = profile
+            model.response_prefix = profile.suppressed_prefix
+            # Recheck: the predefined prefix may be missing a trailing newline.
+            recheck_prefix = True
 
     if model.response_prefix:
         print(f"* Prefix found: [bold]{model.response_prefix!r}[/]")
@@ -475,6 +502,12 @@ def run():
         if additional_prefix:
             model.response_prefix += additional_prefix
             print(f"* Extended prefix found: [bold]{model.response_prefix!r}[/]")
+
+    if settings.thinking_eval_enabled and model.thinking_profile is None:
+        print(
+            "[yellow]Warning:[/] thinking_eval_enabled is true but no supported "
+            "thinking prefix was detected. Thinking evaluation will be skipped."
+        )
 
     evaluator = Evaluator(settings, model)
 
@@ -612,8 +645,8 @@ def run():
         if pending is None:
             return
         pending_score, prev_trial, prev_idx = pending
-        score, kl_divergence, refusals = pending_score.resolve(timeout=timeout)
-        print(f"  * Refusals: [bold]{refusals}[/]/{len(evaluator.bad_prompts)}")
+        result = pending_score.resolve(timeout=timeout)
+        print(f"  * Refusals: [bold]{result.refusals}[/]/{len(evaluator.bad_prompts)}")
 
         elapsed_time = time.perf_counter() - start_time
         print()
@@ -626,9 +659,69 @@ def run():
             )
         print_memory_usage()
 
-        prev_trial.set_user_attr("kl_divergence", kl_divergence)
-        prev_trial.set_user_attr("refusals", refusals)
-        study.tell(prev_trial, score)
+        prev_trial.set_user_attr("kl_divergence", result.kl_divergence)
+        prev_trial.set_user_attr("refusals", result.refusals)
+        if result.thinking_completion_rate is not None:
+            prev_trial.set_user_attr(
+                "thinking_completion_rate", result.thinking_completion_rate
+            )
+            prev_trial.set_user_attr("thinking_failures", result.thinking_failures)
+            prev_trial.set_user_attr("thinking_samples", result.thinking_samples)
+        study.tell(prev_trial, result.objectives)
+
+    # Run baseline sanity check BEFORE creating the study so that the objective
+    # shape is final. This avoids the bug where a 3-objective study is created
+    # but baseline failure downgrades to 2-objective evaluations at runtime.
+    thinking_eval_active = evaluator._thinking_eval_active
+    trial_thinking_prompts: list[Prompt] = []
+    thinking_eval_seed: int | None = None
+    thinking_eval_indices: list[int] | None = None
+
+    if thinking_eval_active and evaluator.thinking_prompts:
+        # Select prompt subset for baseline check.
+        seed = random.randint(0, 2**31 - 1)
+        rng = random.Random(seed)
+        indices = list(range(len(evaluator.thinking_prompts)))
+        rng.shuffle(indices)
+        n_samples = min(settings.thinking_eval_samples, len(indices))
+        selected_indices = sorted(indices[:n_samples])
+        trial_thinking_prompts = [
+            evaluator.thinking_prompts[i] for i in selected_indices
+        ]
+        thinking_eval_seed = seed
+        thinking_eval_indices = selected_indices
+        print(f"* Thinking evaluation: using {n_samples} prompts (seed={seed})")
+
+        # Baseline sanity check: evaluate thinking on the unablated model.
+        print("* Running thinking baseline sanity check...")
+        baseline_rate, baseline_failures, baseline_total = evaluator.evaluate_thinking(
+            trial_thinking_prompts
+        )
+        pct = baseline_rate * 100
+        print(
+            f"  * Baseline thinking: {baseline_total - baseline_failures}/{baseline_total} "
+            f"complete ({pct:.1f}%)"
+        )
+        if baseline_rate < 0.5:
+            print(
+                "[yellow]Warning:[/] baseline thinking completion rate is below 50%. "
+                "The unablated model may not support this thinking syntax reliably. "
+                "Disabling thinking evaluation for this run."
+            )
+            thinking_eval_active = False
+            trial_thinking_prompts = []
+
+    # Determine study objective shape AFTER baseline check is final.
+    if thinking_eval_active:
+        directions = [
+            StudyDirection.MINIMIZE,
+            StudyDirection.MINIMIZE,
+            StudyDirection.MINIMIZE,
+        ]
+        objective_names = ["kld_score", "refusals_score", "thinking_incompletion"]
+    else:
+        directions = [StudyDirection.MINIMIZE, StudyDirection.MINIMIZE]
+        objective_names = ["kld_score", "refusals_score"]
 
     study = optuna.create_study(
         sampler=TPESampler(
@@ -636,14 +729,47 @@ def run():
             n_ei_candidates=128,
             multivariate=True,
         ),
-        directions=[StudyDirection.MINIMIZE, StudyDirection.MINIMIZE],
+        directions=directions,
         storage=storage,
         study_name="heretic",
         load_if_exists=True,
     )
 
+    # Resume validation: objective shape must match between checkpoint and config.
+    stored_n_objectives = study.user_attrs.get("n_objectives")
+    if stored_n_objectives is not None and stored_n_objectives != len(directions):
+        print(
+            f"[red]Error:[/] checkpoint has {stored_n_objectives} objectives but "
+            f"current config expects {len(directions)}. Delete the checkpoint or "
+            f"change thinking_eval_enabled to match."
+        )
+        sys.exit(1)
+
     study.set_user_attr("settings", settings.model_dump_json())
     study.set_user_attr("finished", False)
+    study.set_user_attr("n_objectives", len(directions))
+    study.set_user_attr("objective_names", objective_names)
+    study.set_user_attr("thinking_eval_active", thinking_eval_active)
+
+    # Persist per-study prompt subset for reproducibility (B1).
+    if thinking_eval_active and thinking_eval_seed is not None:
+        # Use stored seed if resuming an existing study.
+        stored_seed = study.user_attrs.get("thinking_eval_seed")
+        if stored_seed is not None and stored_seed != thinking_eval_seed:
+            # Re-derive subset from the stored seed for consistency.
+            rng = random.Random(stored_seed)
+            indices = list(range(len(evaluator.thinking_prompts)))
+            rng.shuffle(indices)
+            n_samples = min(settings.thinking_eval_samples, len(indices))
+            selected_indices = sorted(indices[:n_samples])
+            trial_thinking_prompts = [
+                evaluator.thinking_prompts[i] for i in selected_indices
+            ]
+            thinking_eval_seed = stored_seed
+            thinking_eval_indices = selected_indices
+
+        study.set_user_attr("thinking_eval_seed", thinking_eval_seed)
+        study.set_user_attr("thinking_eval_prompt_indices", thinking_eval_indices)
 
     def count_completed_trials() -> int:
         # Count number of complete trials to compute trials to run.
@@ -694,7 +820,9 @@ def run():
                 suggest_and_abliterate(current_trial, trial_index)
 
                 print("* Evaluating...")
-                new_pending = evaluator.start_evaluation()
+                new_pending = evaluator.start_evaluation(
+                    thinking_prompts=trial_thinking_prompts or None,
+                )
 
                 # Resolve PREVIOUS trial's LLM judge (ran during this trial's GPU work).
                 resolve_pending(pending)
@@ -725,34 +853,118 @@ def run():
         if not completed_trials:
             raise KeyboardInterrupt
 
-        # Get the Pareto front of trials. We can't use study.best_trials directly
-        # as get_score() doesn't return the pure KL divergence and refusal count.
-        # Note: Unlike study.best_trials, this does not handle objective constraints.
-        sorted_trials = sorted(
-            completed_trials,
-            key=lambda trial: (
+        # Generic Pareto extraction using raw trial metrics.
+        # A trial is Pareto-optimal if no other trial is better on ALL metrics.
+        def _get_metric_vector(trial: Trial) -> list[float]:
+            """Return minimization metrics for Pareto dominance checking."""
+            metrics = [
                 trial.user_attrs["refusals"],
                 trial.user_attrs["kl_divergence"],
-            ),
-        )
-        min_divergence = math.inf
+            ]
+            rate = trial.user_attrs.get("thinking_completion_rate")
+            if rate is not None:
+                # Minimize incompletion (1 - rate).
+                metrics.append(1.0 - rate)
+            return metrics
+
+        def _dominates(a: list[float], b: list[float]) -> bool:
+            """Return True if a dominates b (a <= b on all, a < b on at least one)."""
+            at_least_one_strict = False
+            for ai, bi in zip(a, b):
+                if ai > bi:
+                    return False
+                if ai < bi:
+                    at_least_one_strict = True
+            return at_least_one_strict
+
+        metric_vectors = [_get_metric_vector(t) for t in completed_trials]
         best_trials = []
-        for trial in sorted_trials:
-            kl_divergence = trial.user_attrs["kl_divergence"]
-            if kl_divergence < min_divergence:
-                min_divergence = kl_divergence
+        for i, trial in enumerate(completed_trials):
+            dominated = False
+            for j, other in enumerate(completed_trials):
+                if i != j and _dominates(metric_vectors[j], metric_vectors[i]):
+                    dominated = True
+                    break
+            if not dominated:
                 best_trials.append(trial)
 
-        choices = [
-            Choice(
-                title=(
-                    f"[Trial {trial.user_attrs['index']:>3}] "
-                    f"Refusals: {trial.user_attrs['refusals']:>2}/{len(evaluator.bad_prompts)}, "
-                    f"KL divergence: {trial.user_attrs['kl_divergence']:.4f}"
-                ),
-                value=trial,
+        # Sort for display: refusals ascending, then KL ascending.
+        best_trials.sort(
+            key=lambda t: (
+                t.user_attrs["refusals"],
+                t.user_attrs["kl_divergence"],
             )
-            for trial in best_trials
+        )
+
+        # Post-optimization stress test: run full thinking eval on top-K Pareto trials.
+        if thinking_eval_active and evaluator.thinking_prompts and best_trials:
+            # Only stress-test the top-K candidates to limit GPU cost.
+            top_k = min(5, len(best_trials))
+            stress_candidates = best_trials[:top_k]
+
+            # Skip trials that already have stress-test results (from prior runs).
+            untested = [
+                t
+                for t in stress_candidates
+                if "thinking_stress_completion_rate" not in t.user_attrs
+            ]
+
+            if untested:
+                print()
+                print(
+                    f"Running thinking stress test on {len(untested)} "
+                    f"Pareto-optimal trial(s)..."
+                )
+                for trial in untested:
+                    idx = trial.user_attrs["index"]
+                    print(f"  * Rebuilding trial {idx}...")
+                    model.reset_model()
+                    model.abliterate(
+                        refusal_directions,
+                        trial.user_attrs["direction_index"],
+                        {
+                            k: AbliterationParameters(**v)
+                            for k, v in trial.user_attrs["parameters"].items()
+                        },
+                    )
+                    rate, failures, total = evaluator.evaluate_thinking(
+                        evaluator.thinking_prompts
+                    )
+                    # FrozenTrial.set_user_attr() only modifies the in-memory
+                    # copy; persist via storage so results survive across runs.
+                    trial.set_user_attr("thinking_stress_completion_rate", rate)
+                    trial.set_user_attr("thinking_stress_failures", failures)
+                    trial.set_user_attr("thinking_stress_samples", total)
+                    storage = study._storage
+                    storage.set_trial_user_attr(
+                        trial._trial_id, "thinking_stress_completion_rate", rate
+                    )
+                    storage.set_trial_user_attr(
+                        trial._trial_id, "thinking_stress_failures", failures
+                    )
+                    storage.set_trial_user_attr(
+                        trial._trial_id, "thinking_stress_samples", total
+                    )
+                    completed = total - failures
+                    pct = rate * 100
+                    print(f"  * Trial {idx}: {completed}/{total} complete ({pct:.1f}%)")
+
+        def _trial_label(trial: Trial) -> str:
+            label = (
+                f"[Trial {trial.user_attrs['index']:>3}] "
+                f"Refusals: {trial.user_attrs['refusals']:>2}/{len(evaluator.bad_prompts)}, "
+                f"KL divergence: {trial.user_attrs['kl_divergence']:.4f}"
+            )
+            rate = trial.user_attrs.get("thinking_completion_rate")
+            if rate is not None:
+                label += f", Thinking: {rate * 100:.0f}%"
+            stress_rate = trial.user_attrs.get("thinking_stress_completion_rate")
+            if stress_rate is not None:
+                label += f" (stress: {stress_rate * 100:.0f}%)"
+            return label
+
+        choices = [
+            Choice(title=_trial_label(trial), value=trial) for trial in best_trials
         ]
 
         choices.append(
@@ -795,15 +1007,32 @@ def run():
                     sys.exit(1)
                 selected = candidates[0]
             else:
-                selected = best_trials[0]
+                # Rank: refusals asc, thinking_stress_completion desc (or
+                # thinking_completion desc), KL asc.
+                def _headless_sort_key(t: Trial) -> tuple[float, ...]:
+                    stress = t.user_attrs.get("thinking_stress_completion_rate")
+                    rate = t.user_attrs.get("thinking_completion_rate")
+                    thinking_key = -(stress if stress is not None else (rate or 0.0))
+                    return (
+                        t.user_attrs["refusals"],
+                        thinking_key,
+                        t.user_attrs["kl_divergence"],
+                    )
+
+                selected = min(best_trials, key=_headless_sort_key)
 
             print()
-            print(
+            headless_msg = (
                 f"[bold green]Headless mode:[/] auto-selected trial "
                 f"[bold]{selected.user_attrs['index']}[/] "
                 f"(refusals: {selected.user_attrs['refusals']}/{len(evaluator.bad_prompts)}, "
-                f"KL divergence: {selected.user_attrs['kl_divergence']:.4f})"
+                f"KL divergence: {selected.user_attrs['kl_divergence']:.4f}"
             )
+            rate = selected.user_attrs.get("thinking_completion_rate")
+            if rate is not None:
+                headless_msg += f", thinking: {rate * 100:.0f}%"
+            headless_msg += ")"
+            print(headless_msg)
 
             # Restore model.
             print("* Resetting model...")
