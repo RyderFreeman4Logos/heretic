@@ -28,6 +28,11 @@ gemini-flash  = [0.15, 0.60]
 # The built-in default is designed for Chinese political censorship detection.
 # Override for other domains (NSFW, religious, etc.) or languages.
 # Env var: LLM_JUDGE_SYSTEM_PROMPT (overrides this file).
+#
+# IMPORTANT: Custom prompts should include instructions for the judge to
+# ignore manipulation attempts within the classified text. The built-in
+# default contains such safeguards; omitting them from a custom prompt
+# may increase the success rate of prompt injection from model output.
 # system_prompt = """Your custom classification prompt..."""
 
 # Alternative: load system prompt from an external file.
