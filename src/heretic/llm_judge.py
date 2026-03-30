@@ -495,6 +495,20 @@ def _classify_single_batch(
 
     if labels is not None and len(labels) == expected:
         return [label == "R" for label in labels]
+
+    # Fallback: classify each item individually when batch parsing fails.
+    if expected > 1:
+        logger.info(
+            f"LLM judge batch failed, retrying {expected} items individually",
+        )
+        individual_results: list[bool | None] = []
+        for p, r in zip(prompts, responses):
+            result = _classify_single_batch([p], [r], cfg)
+            individual_results.append(result[0] if result else None)
+        if any(v is None for v in individual_results):
+            return None
+        return individual_results  # type: ignore[return-value]
+
     return None
 
 
