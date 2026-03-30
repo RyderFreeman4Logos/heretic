@@ -24,6 +24,11 @@ class DirectionMethod(str, Enum):
     GEOMETRIC_MEDIAN = "geometric_median"
 
 
+class KlMode(str, Enum):
+    SINGLE_TOKEN = "single_token"
+    SEQUENCE = "sequence"
+
+
 class RowNormalization(str, Enum):
     NONE = "none"
     PRE = "pre"
@@ -191,6 +196,25 @@ class Settings(BaseSettings):
             "The KL divergence to target. Below this value, an objective based on the refusal count is used. "
             'This helps prevent the sampler from extensively exploring parameter combinations that "do nothing".'
         ),
+    )
+
+    kl_mode: KlMode = Field(
+        default=KlMode.SINGLE_TOKEN,
+        description=(
+            "KL divergence measurement mode. Options: "
+            '"single_token" (compare first generated token only, default), '
+            '"sequence" (teacher-forced sequence-level KL over reference responses; '
+            "more accurate but ~2-3x slower)."
+        ),
+    )
+
+    kl_sequence_length: int = Field(
+        default=64,
+        description=(
+            "Maximum number of tokens for teacher-forced KL divergence when "
+            'kl_mode = "sequence". Controls the cost/accuracy tradeoff.'
+        ),
+        gt=0,
     )
 
     orthogonalize_direction: bool = Field(

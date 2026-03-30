@@ -728,6 +728,127 @@ class Model:
 
         return torch.cat(logprobs, dim=0)
 
+    def get_sequence_logprobs(
+        self, prompts: list[Prompt], reference_ids: Tensor
+    ) -> Tensor:
+        """Teacher-forced logprobs: single forward pass, no autoregressive generation.
+
+        Args:
+            prompts: Chat prompts to condition on.
+            reference_ids: Token IDs for the reference continuation,
+                           shape (batch, seq_len).
+
+        Returns:
+            Log-softmax over vocabulary at each reference position,
+            shape (batch, seq_len, vocab_size).
+        """
+        chats = [
+            [
+                {"role": "system", "content": prompt.system},
+                {"role": "user", "content": prompt.user},
+            ]
+            for prompt in prompts
+        ]
+
+        template_kwargs: dict[str, Any] = {}
+        if self.thinking_profile and self.thinking_profile.template_controlled:
+            template_kwargs["enable_thinking"] = False
+
+        # This cast is valid because list[str] is the return type
+        # for batched operation with tokenize=False.
+        chat_texts = cast(
+            list[str],
+            self.tokenizer.apply_chat_template(
+                chats,
+                tokenize=False,
+                add_generation_prompt=True,
+                **template_kwargs,
+            ),
+        )
+
+        if self.response_prefix:
+            chat_texts = [text + self.response_prefix for text in chat_texts]
+
+        prompt_encodings = self.tokenizer(
+            chat_texts,
+            padding=True,
+            return_tensors="pt",
+            return_token_type_ids=False,
+        )
+        prompt_ids = prompt_encodings.input_ids.to(self.model.device)
+        attention_mask = prompt_encodings.attention_mask.to(self.model.device)
+
+        # Concatenate prompt with reference tokens.
+        ref_ids = reference_ids.to(self.model.device)
+        full_ids = torch.cat([prompt_ids, ref_ids], dim=1)
+        ref_mask = torch.ones_like(ref_ids)
+        full_mask = torch.cat([attention_mask, ref_mask], dim=1)
+
+        with torch.no_grad():
+            outputs = self.model(input_ids=full_ids, attention_mask=full_mask)
+
+        # Extract logits at reference positions.
+        # The logit at position i predicts the token at position i+1,
+        # so logits at [prompt_len-1 : prompt_len+seq_len-1] predict
+        # the reference tokens at [0 : seq_len].
+        prompt_len = prompt_ids.shape[1]
+        seq_len = ref_ids.shape[1]
+        ref_logits = outputs.logits[:, prompt_len - 1 : prompt_len + seq_len - 1, :]
+
+        # The returned tensor has shape (batch, seq_len, vocab_size).
+        return F.log_softmax(ref_logits, dim=-1)
+
+    def get_sequence_logprobs_batched(
+        self, prompts: list[Prompt], reference_ids: Tensor
+    ) -> Tensor:
+        logprobs = []
+
+        for batch in batchify(prompts, self.settings.batch_size):
+            batch_start = sum(lp.shape[0] for lp in logprobs)
+            batch_end = batch_start + len(batch)
+            batch_refs = reference_ids[batch_start:batch_end]
+            logprobs.append(self.get_sequence_logprobs(batch, batch_refs))
+
+        return torch.cat(logprobs, dim=0)
+
+    def generate_reference_ids(self, prompts: list[Prompt], seq_length: int) -> Tensor:
+        """Generate reference token IDs from the unablated model for sequence KL.
+
+        Returns a (num_prompts, seq_length) tensor of token IDs, padded or
+        truncated to exactly seq_length tokens.
+        """
+        all_ids: list[Tensor] = []
+        pad_id = self.tokenizer.pad_token_id or 0
+
+        for batch in batchify(prompts, self.settings.batch_size):
+            inputs, outputs = self.generate(
+                batch,
+                max_new_tokens=seq_length,
+            )
+
+            # Extract the generated portion (excluding the prompt tokens).
+            prompt_len = cast(Tensor, inputs["input_ids"]).shape[1]
+            generated = outputs[:, prompt_len:]
+
+            # Truncate or right-pad each sequence to exactly seq_length.
+            batch_size_actual = generated.shape[0]
+            gen_len = generated.shape[1]
+
+            if gen_len >= seq_length:
+                generated = generated[:, :seq_length]
+            else:
+                padding = torch.full(
+                    (batch_size_actual, seq_length - gen_len),
+                    pad_id,
+                    dtype=generated.dtype,
+                    device=generated.device,
+                )
+                generated = torch.cat([generated, padding], dim=1)
+
+            all_ids.append(generated.cpu())
+
+        return torch.cat(all_ids, dim=0)
+
     def stream_chat_response(self, chat: list[dict[str, str]]) -> str:
         # This cast is valid because str is the return type
         # for single-chat operation with tokenize=False.

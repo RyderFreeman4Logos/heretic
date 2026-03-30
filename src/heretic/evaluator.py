@@ -11,7 +11,7 @@ from dataclasses import dataclass
 import torch.nn.functional as F
 from torch import Tensor
 
-from .config import Settings
+from .config import KlMode, Settings
 from .model import Model
 from .utils import Prompt, load_prompts, print
 
@@ -162,8 +162,19 @@ class Evaluator:
         self.good_prompts = load_prompts(settings, settings.good_evaluation_prompts)
         print(f"* [bold]{len(self.good_prompts)}[/] prompts loaded")
 
-        print("* Obtaining first-token probability distributions...")
-        self.base_logprobs = model.get_logprobs_batched(self.good_prompts)
+        if settings.kl_mode == KlMode.SEQUENCE:
+            print("* Generating reference responses for sequence-level KL...")
+            self.reference_ids = model.generate_reference_ids(
+                self.good_prompts, settings.kl_sequence_length
+            )
+            print("* Obtaining sequence-level probability distributions...")
+            self.base_logprobs = model.get_sequence_logprobs_batched(
+                self.good_prompts, self.reference_ids
+            )
+        else:
+            self.reference_ids = None
+            print("* Obtaining first-token probability distributions...")
+            self.base_logprobs = model.get_logprobs_batched(self.good_prompts)
 
         print()
         print(
@@ -350,14 +361,26 @@ class Evaluator:
             )
 
         # GPU: logprobs for good prompts (overlaps with LLM judge).
-        print("  * Obtaining first-token probability distributions...")
-        logprobs = self.model.get_logprobs_batched(self.good_prompts)
-        kl_divergence = F.kl_div(
-            logprobs,
-            self.base_logprobs,
-            reduction="batchmean",
-            log_target=True,
-        ).item()
+        if self.settings.kl_mode == KlMode.SEQUENCE:
+            print("  * Obtaining sequence-level probability distributions...")
+            logprobs = self.model.get_sequence_logprobs_batched(
+                self.good_prompts,
+                self.reference_ids,  # ty:ignore[invalid-argument-type]
+            )
+            # Per-position KL summed over vocab, then averaged across positions and prompts.
+            kl_per_pos = F.kl_div(
+                logprobs, self.base_logprobs, reduction="none", log_target=True
+            ).sum(dim=-1)
+            kl_divergence = kl_per_pos.mean().item()
+        else:
+            print("  * Obtaining first-token probability distributions...")
+            logprobs = self.model.get_logprobs_batched(self.good_prompts)
+            kl_divergence = F.kl_div(
+                logprobs,
+                self.base_logprobs,
+                reduction="batchmean",
+                log_target=True,
+            ).item()
         print(f"  * KL divergence: [bold]{kl_divergence:.4f}[/]")
 
         # GPU: secondary thinking pass (serial, but LLM judge runs in parallel).
