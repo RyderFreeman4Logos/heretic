@@ -811,13 +811,19 @@ class Model:
 
         return torch.cat(logprobs, dim=0)
 
-    def generate_reference_ids(self, prompts: list[Prompt], seq_length: int) -> Tensor:
+    def generate_reference_ids(
+        self, prompts: list[Prompt], seq_length: int
+    ) -> tuple[Tensor, Tensor]:
         """Generate reference token IDs from the unablated model for sequence KL.
 
-        Returns a (num_prompts, seq_length) tensor of token IDs, padded or
-        truncated to exactly seq_length tokens.
+        Returns:
+            reference_ids: (num_prompts, seq_length) tensor of token IDs,
+                padded or truncated to exactly seq_length tokens.
+            reference_mask: (num_prompts, seq_length) boolean mask where True
+                indicates real (non-padding) positions.
         """
         all_ids: list[Tensor] = []
+        all_masks: list[Tensor] = []
         pad_id = self.tokenizer.pad_token_id or 0
 
         for batch in batchify(prompts, self.settings.batch_size):
@@ -836,7 +842,17 @@ class Model:
 
             if gen_len >= seq_length:
                 generated = generated[:, :seq_length]
+                mask = torch.ones(batch_size_actual, seq_length, dtype=torch.bool)
             else:
+                mask = torch.cat(
+                    [
+                        torch.ones(batch_size_actual, gen_len, dtype=torch.bool),
+                        torch.zeros(
+                            batch_size_actual, seq_length - gen_len, dtype=torch.bool
+                        ),
+                    ],
+                    dim=1,
+                )
                 padding = torch.full(
                     (batch_size_actual, seq_length - gen_len),
                     pad_id,
@@ -846,8 +862,9 @@ class Model:
                 generated = torch.cat([generated, padding], dim=1)
 
             all_ids.append(generated.cpu())
+            all_masks.append(mask)
 
-        return torch.cat(all_ids, dim=0)
+        return torch.cat(all_ids, dim=0), torch.cat(all_masks, dim=0)
 
     def stream_chat_response(self, chat: list[dict[str, str]]) -> str:
         # This cast is valid because str is the return type

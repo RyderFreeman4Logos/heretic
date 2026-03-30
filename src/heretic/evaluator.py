@@ -164,7 +164,7 @@ class Evaluator:
 
         if settings.kl_mode == KlMode.SEQUENCE:
             print("* Generating reference responses for sequence-level KL...")
-            self.reference_ids = model.generate_reference_ids(
+            self.reference_ids, self.reference_mask = model.generate_reference_ids(
                 self.good_prompts, settings.kl_sequence_length
             )
             print("* Obtaining sequence-level probability distributions...")
@@ -173,6 +173,7 @@ class Evaluator:
             )
         else:
             self.reference_ids = None
+            self.reference_mask = None
             print("* Obtaining first-token probability distributions...")
             self.base_logprobs = model.get_logprobs_batched(self.good_prompts)
 
@@ -367,11 +368,14 @@ class Evaluator:
                 self.good_prompts,
                 self.reference_ids,  # ty:ignore[invalid-argument-type]
             )
-            # Per-position KL summed over vocab, then averaged across positions and prompts.
+            # Per-position KL summed over vocab, masked to exclude padding positions.
             kl_per_pos = F.kl_div(
                 logprobs, self.base_logprobs, reduction="none", log_target=True
             ).sum(dim=-1)
-            kl_divergence = kl_per_pos.mean().item()
+            mask = self.reference_mask.to(  # ty:ignore[possibly-missing-attribute]
+                device=kl_per_pos.device, dtype=kl_per_pos.dtype
+            )
+            kl_divergence = (kl_per_pos * mask).sum().item() / mask.sum().item()
         else:
             print("  * Obtaining first-token probability distributions...")
             logprobs = self.model.get_logprobs_batched(self.good_prompts)
