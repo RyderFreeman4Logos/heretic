@@ -801,10 +801,14 @@ class Model:
     def get_sequence_logprobs_batched(
         self, prompts: list[Prompt], reference_ids: Tensor
     ) -> Tensor:
+        # Sequence KL computes full logits (vocab_size) for every position,
+        # which is far more memory-intensive than generation. Cap the batch
+        # size to avoid OOM on large-vocab models (e.g. Qwen3.5 248K vocab).
+        kl_batch_size = min(self.settings.batch_size, 32)
         logprobs = []
         offset = 0
 
-        for batch in batchify(prompts, self.settings.batch_size):
+        for batch in batchify(prompts, kl_batch_size):
             batch_refs = reference_ids[offset : offset + len(batch)]
             logprobs.append(self.get_sequence_logprobs(batch, batch_refs))
             offset += len(batch)
