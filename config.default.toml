@@ -64,6 +64,16 @@ kl_divergence_scale = 1.0
 # This helps prevent the sampler from extensively exploring parameter combinations that "do nothing".
 kl_divergence_target = 0.01
 
+# KL divergence measurement mode.
+# "single_token" (default): compare first generated token only — fast.
+# "sequence": teacher-forced KL over reference responses — more accurate
+# for detecting capability damage, ~2-3x slower per trial.
+kl_mode = "single_token"
+
+# Maximum tokens for teacher-forced KL when kl_mode = "sequence".
+# Higher values give more accurate capability measurement at higher cost.
+kl_sequence_length = 64
+
 # Whether to adjust the refusal directions so that only the component that is
 # orthogonal to the good direction is subtracted during abliteration.
 orthogonalize_direction = false
