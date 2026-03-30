@@ -8,14 +8,14 @@ pre-commit:
       run: |
         branch=$(git rev-parse --abbrev-ref HEAD)
         if [ "$branch" = "master" ] || [ "$branch" = "main" ]; then
-          cat <<'BLOCK'
+          cat <<BLOCK
 
         ═══════════════════════════════════════════════════════════════
-        ❌ DIRECT COMMIT TO MASTER IS PROHIBITED
+        ❌ DIRECT COMMIT TO $branch IS PROHIBITED
         ═══════════════════════════════════════════════════════════════
 
         <IMPORTANT>
-        You attempted to commit directly to the protected branch "master".
+        You attempted to commit directly to the protected branch "$branch".
         This violates the project's dev2merge workflow.
 
         You MUST follow this procedure:
@@ -27,7 +27,7 @@ pre-commit:
 
         3. PUSH the branch and create a Pull Request:
              git push -u origin feat/<descriptive-name>
-             gh pr create --base master
+             gh pr create --base $branch
 
         4. RUN the full pr-codex-bot review flow:
              /pr-codex-bot  (local CSA review → cloud bot → arbitration → merge)
@@ -35,7 +35,7 @@ pre-commit:
         5. ONLY merge after ALL review gates pass.
 
         DO NOT use --no-verify to bypass this hook.
-        DO NOT use git push --force to master.
+        DO NOT use git push --force to $branch.
         See CLAUDE.md "PR Workflow (MANDATORY)" for details.
         </IMPORTANT>
 
