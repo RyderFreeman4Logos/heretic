@@ -294,7 +294,9 @@ class Evaluator:
         try:
             self.model.response_prefix = ""
             responses = self.model.get_responses_batched(
-                prompts, skip_special_tokens=False
+                prompts,
+                skip_special_tokens=False,
+                enable_thinking=True if profile.template_controlled else None,
             )
         finally:
             self.model.response_prefix = original_prefix
@@ -304,10 +306,16 @@ class Evaluator:
             if not response.strip():
                 failures += 1
                 continue
-            open_pos = response.find(profile.opening_marker)
             close_pos = response.find(profile.completion_marker)
-            if open_pos < 0 or close_pos < 0 or close_pos <= open_pos:
-                failures += 1
+            if profile.template_controlled:
+                # Template-controlled models (e.g. Qwen3.5) put <think> in the
+                # input via the chat template; only </think> appears in output.
+                if close_pos < 0:
+                    failures += 1
+            else:
+                open_pos = response.find(profile.opening_marker)
+                if open_pos < 0 or close_pos < 0 or close_pos <= open_pos:
+                    failures += 1
 
         total = len(prompts)
         rate = (total - failures) / total if total > 0 else 0.0

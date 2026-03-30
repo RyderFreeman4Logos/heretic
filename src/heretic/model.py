@@ -52,6 +52,7 @@ class ThinkingProfile:
     opening_marker: str
     completion_marker: str
     suppressed_prefix: str
+    template_controlled: bool = False
 
 
 @dataclass
@@ -555,6 +556,7 @@ class Model:
     def generate(
         self,
         prompts: list[Prompt],
+        enable_thinking: bool | None = None,
         **kwargs: Any,
     ) -> tuple[BatchEncoding, GenerateDecoderOnlyOutput | LongTensor]:
         chats = [
@@ -565,6 +567,10 @@ class Model:
             for prompt in prompts
         ]
 
+        template_kwargs: dict[str, Any] = {}
+        if enable_thinking is not None:
+            template_kwargs["enable_thinking"] = enable_thinking
+
         # This cast is valid because list[str] is the return type
         # for batched operation with tokenize=False.
         chat_prompts = cast(
@@ -573,6 +579,7 @@ class Model:
                 chats,
                 add_generation_prompt=True,
                 tokenize=False,
+                **template_kwargs,
             ),
         )
 
@@ -603,10 +610,12 @@ class Model:
         self,
         prompts: list[Prompt],
         skip_special_tokens: bool = False,
+        enable_thinking: bool | None = None,
     ) -> list[str]:
         inputs, outputs = self.generate(
             prompts,
             max_new_tokens=self.settings.max_response_length,
+            enable_thinking=enable_thinking,
         )
 
         return self.tokenizer.batch_decode(
@@ -621,6 +630,7 @@ class Model:
         self,
         prompts: list[Prompt],
         skip_special_tokens: bool = False,
+        enable_thinking: bool | None = None,
     ) -> list[str]:
         responses = []
 
@@ -628,6 +638,7 @@ class Model:
             for response in self.get_responses(
                 batch,
                 skip_special_tokens=skip_special_tokens,
+                enable_thinking=enable_thinking,
             ):
                 responses.append(response)
 

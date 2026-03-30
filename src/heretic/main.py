@@ -503,6 +503,27 @@ def run():
             model.response_prefix += additional_prefix
             print(f"* Extended prefix found: [bold]{model.response_prefix!r}[/]")
 
+    # Fallback: detect thinking model from chat template (e.g. Qwen3.5).
+    # These models control thinking via the template's enable_thinking parameter
+    # rather than emitting <think> as part of the model output.
+    if (
+        model.thinking_profile is None
+        and hasattr(model.tokenizer, "chat_template")
+        and model.tokenizer.chat_template
+        and "enable_thinking" in model.tokenizer.chat_template
+    ):
+        model.thinking_profile = ThinkingProfile(
+            name="think",
+            opening_marker="<think>",
+            completion_marker="</think>",
+            suppressed_prefix="<think></think>",
+            template_controlled=True,
+        )
+        print(
+            "* Thinking model detected from chat template "
+            f"(profile: [bold]{model.thinking_profile.name}[/], template-controlled)"
+        )
+
     if settings.thinking_eval_enabled and model.thinking_profile is None:
         print(
             "[yellow]Warning:[/] thinking_eval_enabled is true but no supported "
