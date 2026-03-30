@@ -1,10 +1,61 @@
 pre-commit:
+  # Run sequentially by priority; stop on first failure.
+  # protect-master runs first — if on master, no point running quality gates.
+  piped: true
   commands:
-    fmt:
+    protect-master:
+      priority: 1
+      run: |
+        branch=$(git rev-parse --abbrev-ref HEAD)
+        if [ "$branch" = "master" ] || [ "$branch" = "main" ]; then
+          cat <<'BLOCK'
+
+        ═══════════════════════════════════════════════════════════════
+        ❌ DIRECT COMMIT TO MASTER IS PROHIBITED
+        ═══════════════════════════════════════════════════════════════
+
+        <IMPORTANT>
+        You attempted to commit directly to the protected branch "master".
+        This violates the project's dev2merge workflow.
+
+        You MUST follow this procedure:
+
+        1. CREATE a feature branch from current HEAD:
+             git checkout -b feat/<descriptive-name>
+
+        2. COMMIT your changes on the feature branch.
+
+        3. PUSH the branch and create a Pull Request:
+             git push -u origin feat/<descriptive-name>
+             gh pr create --base master
+
+        4. RUN the full pr-codex-bot review flow:
+             /pr-codex-bot  (local CSA review → cloud bot → arbitration → merge)
+
+        5. ONLY merge after ALL review gates pass.
+
+        DO NOT use --no-verify to bypass this hook.
+        DO NOT use git push --force to master.
+        See CLAUDE.md "PR Workflow (MANDATORY)" for details.
+        </IMPORTANT>
+
+        For humans: create a feature branch first.
+          git checkout -b feat/your-feature-name
+
+        ═══════════════════════════════════════════════════════════════
+
+        BLOCK
+          exit 1
+        fi
+    fmt-check:
+      priority: 2
       run: mise run fmt
-    lint:
+    lint-check:
+      priority: 3
       run: mise run lint
     typecheck:
+      priority: 4
       run: mise run typecheck
     build:
+      priority: 5
       run: mise run build
