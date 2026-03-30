@@ -52,7 +52,7 @@ from rich.table import Table
 from rich.traceback import install
 
 from .analyzer import Analyzer
-from .config import QuantizationMethod, Settings
+from .config import DirectionMethod, QuantizationMethod, Settings
 from .evaluator import Evaluator, PendingScore
 from .model import AbliterationParameters, Model, ThinkingProfile, get_model_class
 from .utils import (
@@ -562,16 +562,38 @@ def run():
     print("* Obtaining residuals for bad prompts...")
     bad_residuals = model.get_residuals_batched(bad_prompts)
 
-    good_means = good_residuals.mean(dim=0)
-    bad_means = bad_residuals.mean(dim=0)
+    if settings.direction_method == DirectionMethod.GEOMETRIC_MEDIAN:
+        try:
+            from geom_median.torch import (  # ty:ignore[unresolved-import]
+                compute_geometric_median,
+            )
+        except ImportError:
+            raise ImportError(
+                'direction_method = "geometric_median" requires the geom-median package. '
+                "Install it with: uv pip install heretic-llm[research]"
+            ) from None
 
-    refusal_directions = F.normalize(bad_means - good_means, p=2, dim=1)
+        def _per_layer_geometric_median(residuals: torch.Tensor) -> torch.Tensor:
+            return torch.stack(
+                [
+                    compute_geometric_median(residuals[:, i, :].detach().cpu()).median
+                    for i in range(residuals.shape[1])
+                ]
+            )
+
+        good_center = _per_layer_geometric_median(good_residuals)
+        bad_center = _per_layer_geometric_median(bad_residuals)
+    else:
+        good_center = good_residuals.mean(dim=0)
+        bad_center = bad_residuals.mean(dim=0)
+
+    refusal_directions = F.normalize(bad_center - good_center, p=2, dim=1)
 
     if settings.orthogonalize_direction:
         # Implements https://huggingface.co/blog/grimjim/projected-abliteration
         # Adjust the refusal directions so that only the component that is
         # orthogonal to the good direction is subtracted during abliteration.
-        good_directions = F.normalize(good_means, p=2, dim=1)
+        good_directions = F.normalize(good_center, p=2, dim=1)
         projection_vector = torch.sum(refusal_directions * good_directions, dim=1)
         refusal_directions = (
             refusal_directions - projection_vector.unsqueeze(1) * good_directions

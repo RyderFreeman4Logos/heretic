@@ -19,6 +19,11 @@ class QuantizationMethod(str, Enum):
     BNB_4BIT = "bnb_4bit"
 
 
+class DirectionMethod(str, Enum):
+    MEAN = "mean"
+    GEOMETRIC_MEDIAN = "geometric_median"
+
+
 class RowNormalization(str, Enum):
     NONE = "none"
     PRE = "pre"
@@ -193,6 +198,15 @@ class Settings(BaseSettings):
         description=(
             "Whether to adjust the refusal directions so that only the component that is "
             "orthogonal to the good direction is subtracted during abliteration."
+        ),
+    )
+
+    direction_method: DirectionMethod = Field(
+        default=DirectionMethod.MEAN,
+        description=(
+            "Method for computing center estimates of residual vectors. Options: "
+            '"mean" (arithmetic mean, default), '
+            '"geometric_median" (L1-optimal center, more robust to outliers; requires geom-median package).'
         ),
     )
 

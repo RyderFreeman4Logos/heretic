@@ -68,6 +68,12 @@ kl_divergence_target = 0.01
 # orthogonal to the good direction is subtracted during abliteration.
 orthogonalize_direction = false
 
+# Method for computing center estimates of residual vectors.
+# "mean" (default): arithmetic mean — fast, standard.
+# "geometric_median": L1-optimal center — more robust to outliers in large
+# datasets (15K+ prompts). Requires geom-median package.
+direction_method = "mean"
+
 # How to apply row normalization of the weights. Options:
 # "none" (no normalization),
 # "pre" (compute LoRA adapter relative to row-normalized weights),
