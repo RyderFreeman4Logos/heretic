@@ -573,19 +573,16 @@ def run():
                 "Install it with: uv pip install heretic-llm[research]"
             ) from None
 
-        n_layers = good_residuals.shape[1]
-        good_center = torch.stack(
-            [
-                compute_geometric_median(good_residuals[:, i, :].detach().cpu()).median
-                for i in range(n_layers)
-            ]
-        )
-        bad_center = torch.stack(
-            [
-                compute_geometric_median(bad_residuals[:, i, :].detach().cpu()).median
-                for i in range(n_layers)
-            ]
-        )
+        def _per_layer_geometric_median(residuals: torch.Tensor) -> torch.Tensor:
+            return torch.stack(
+                [
+                    compute_geometric_median(residuals[:, i, :].detach().cpu()).median
+                    for i in range(residuals.shape[1])
+                ]
+            )
+
+        good_center = _per_layer_geometric_median(good_residuals)
+        bad_center = _per_layer_geometric_median(bad_residuals)
     else:
         good_center = good_residuals.mean(dim=0)
         bad_center = bad_residuals.mean(dim=0)
