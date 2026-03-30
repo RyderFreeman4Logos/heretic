@@ -167,6 +167,11 @@ refusal_markers = [
 # Use LLM judge for refusal classification instead of substring matching.
 use_llm_judge = false
 
+# Whether to use substring matching for refusal detection.
+# When use_llm_judge is enabled, set to false to rely solely on the LLM judge.
+# When use_llm_judge is disabled, substring matching is always used.
+substring_matching = true
+
 # System prompt to use when prompting the model.
 system_prompt = "You are a helpful assistant."
 

@@ -405,6 +405,16 @@ class Settings(BaseSettings):
         description="Use LLM judge for refusal classification instead of substring matching.",
     )
 
+    substring_matching: bool = Field(
+        default=True,
+        description=(
+            "Whether to use substring matching for refusal detection. "
+            "When use_llm_judge is enabled, this can be set to false to rely "
+            "solely on the LLM judge. When use_llm_judge is disabled, substring "
+            "matching is always used regardless of this setting."
+        ),
+    )
+
     system_prompt: str = Field(
         default="You are a helpful assistant.",
         description="System prompt to use when prompting the model.",

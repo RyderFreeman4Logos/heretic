@@ -74,6 +74,19 @@ class PendingScore:
 
         ev._last_used_llm_judge = refusal_flags is not None
 
+        # When substring_matching is disabled but LLM judge failed, fall back
+        # to substring with a warning (safety behavior).
+        use_substring_fallback = (
+            refusal_flags is None
+            and ev.settings.use_llm_judge
+            and not ev.settings.substring_matching
+        )
+        if use_substring_fallback:
+            logger.warning(
+                "LLM judge failed and substring_matching is disabled; "
+                "falling back to substring matching for safety",
+            )
+
         refusals = 0
         for i, response in enumerate(self._responses):
             is_ref = (
@@ -192,7 +205,7 @@ class Evaluator:
             skip_special_tokens=True,
         )
 
-        # Always compute substring baseline.
+        # Always compute substring baseline (used as fallback even when disabled).
         self._base_refusals_substring = sum(
             1 for r in base_responses if self.is_refusal(r)
         )
@@ -203,9 +216,14 @@ class Evaluator:
             if flags is not None:
                 self._base_refusals_llm = sum(flags)
                 self.base_refusals = self._base_refusals_llm
-                logger.info(
-                    f"Baseline: LLM judge={self._base_refusals_llm}, substring={self._base_refusals_substring}",
-                )
+                if settings.substring_matching:
+                    logger.info(
+                        f"Baseline: LLM judge={self._base_refusals_llm}, substring={self._base_refusals_substring}",
+                    )
+                else:
+                    logger.info(
+                        f"Baseline: LLM judge={self._base_refusals_llm} (substring matching disabled)",
+                    )
             else:
                 self.base_refusals = self._base_refusals_substring
                 logger.warning(
