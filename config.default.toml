@@ -31,7 +31,9 @@ device_map = "auto"
 batch_size = 0  # auto
 
 # Maximum batch size to try when automatically determining the optimal batch size.
-max_batch_size = 128
+# High-VRAM systems (e.g. GB10 with 128GB unified memory) benefit from larger
+# batches that shift the workload from memory-bandwidth-bound to compute-bound.
+max_batch_size = 512
 
 # Maximum number of tokens to generate for each response.
 max_response_length = 100

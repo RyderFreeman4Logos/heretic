@@ -425,9 +425,17 @@ def run():
         print()
         print("Determining optimal batch size...")
 
+        if torch.cuda.is_available():
+            free_mem, total_mem = torch.cuda.mem_get_info()
+            print(
+                f"* GPU memory: [bold]{total_mem / 1024**3:.1f}[/] GB total, "
+                f"[bold]{free_mem / 1024**3:.1f}[/] GB free"
+            )
+
         batch_size = 1
         best_batch_size = -1
-        best_performance = -1
+        best_performance = -1.0
+        regressions = 0
 
         while batch_size <= settings.max_batch_size:
             print(f"* Trying batch size [bold]{batch_size}[/]... ", end="")
@@ -461,6 +469,12 @@ def run():
             if performance > best_performance:
                 best_batch_size = batch_size
                 best_performance = performance
+                regressions = 0
+            else:
+                regressions += 1
+                if regressions >= 2:
+                    print("* Throughput declining, stopping search")
+                    break
 
             batch_size *= 2
 
