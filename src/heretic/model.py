@@ -805,7 +805,9 @@ class Model:
         # Sequence KL computes full logits (vocab_size) for every position,
         # which is far more memory-intensive than generation. Cap the batch
         # size to avoid OOM on large-vocab models (e.g. Qwen3.5 248K vocab).
-        kl_batch_size = min(self.settings.batch_size, 32)
+        kl_batch_size = (
+            min(self.settings.batch_size, 32) if self.settings.batch_size > 0 else 32
+        )
         logprobs = []
         offset = 0
 
@@ -825,7 +827,9 @@ class Model:
         logprobs tensor for thousands of prompts can exceed physical memory.
         Writing to disk and streaming back during KL computation avoids OOM.
         """
-        kl_batch_size = min(self.settings.batch_size, 32)
+        kl_batch_size = (
+            min(self.settings.batch_size, 32) if self.settings.batch_size > 0 else 32
+        )
         fp = None
         shape: tuple[int, ...] = ()
         offset = 0
@@ -838,7 +842,7 @@ class Model:
                 shape = (len(prompts), logprobs.shape[1], logprobs.shape[2])
                 fp = np.memmap(filepath, dtype="float16", mode="w+", shape=shape)
 
-            fp[offset : offset + len(batch)] = logprobs.cpu().to(torch.float16).numpy()
+            fp[offset : offset + len(batch)] = logprobs.to(torch.float16).cpu().numpy()
             del logprobs
             empty_cache()
             offset += len(batch)
@@ -862,7 +866,9 @@ class Model:
         Only one batch of base + trial logprobs is in GPU memory at a time,
         keeping peak usage at ~2× single-batch size instead of 2× full dataset.
         """
-        kl_batch_size = min(self.settings.batch_size, 32)
+        kl_batch_size = (
+            min(self.settings.batch_size, 32) if self.settings.batch_size > 0 else 32
+        )
         base_fp = np.memmap(
             base_logprobs_file, dtype="float16", mode="r", shape=base_logprobs_shape
         )
