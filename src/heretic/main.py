@@ -564,11 +564,13 @@ def run():
 
     if settings.direction_method == DirectionMethod.GEOMETRIC_MEDIAN:
         try:
-            from geom_median.torch import compute_geometric_median
+            from geom_median.torch import (  # ty:ignore[unresolved-import]
+                compute_geometric_median,
+            )
         except ImportError:
             raise ImportError(
                 'direction_method = "geometric_median" requires the geom-median package. '
-                "Install it with: pip install geom-median"
+                "Install it with: uv pip install heretic-llm[research]"
             ) from None
 
         n_layers = good_residuals.shape[1]
