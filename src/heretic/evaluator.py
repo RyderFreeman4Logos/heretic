@@ -129,6 +129,8 @@ class Evaluator:
     bad_prompts: list[Prompt]
     base_logprobs: Tensor
     base_refusals: int
+    reference_ids: Tensor | None
+    reference_mask: Tensor | None
 
     def __init__(self, settings: Settings, model: Model) -> None:
         self.settings = settings
@@ -363,16 +365,18 @@ class Evaluator:
 
         # GPU: logprobs for good prompts (overlaps with LLM judge).
         if self.settings.kl_mode == KlMode.SEQUENCE:
+            assert self.reference_ids is not None
+            assert self.reference_mask is not None
             print("  * Obtaining sequence-level probability distributions...")
             logprobs = self.model.get_sequence_logprobs_batched(
                 self.good_prompts,
-                self.reference_ids,  # ty:ignore[invalid-argument-type]
+                self.reference_ids,
             )
             # Per-position KL summed over vocab, masked to exclude padding positions.
             kl_per_pos = F.kl_div(
                 logprobs, self.base_logprobs, reduction="none", log_target=True
             ).sum(dim=-1)
-            mask = self.reference_mask.to(  # ty:ignore[possibly-missing-attribute]
+            mask = self.reference_mask.to(
                 device=kl_per_pos.device, dtype=kl_per_pos.dtype
             )
             kl_divergence = (kl_per_pos * mask).sum().item() / mask.sum().item()

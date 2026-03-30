@@ -802,12 +802,12 @@ class Model:
         self, prompts: list[Prompt], reference_ids: Tensor
     ) -> Tensor:
         logprobs = []
+        offset = 0
 
         for batch in batchify(prompts, self.settings.batch_size):
-            batch_start = sum(lp.shape[0] for lp in logprobs)
-            batch_end = batch_start + len(batch)
-            batch_refs = reference_ids[batch_start:batch_end]
+            batch_refs = reference_ids[offset : offset + len(batch)]
             logprobs.append(self.get_sequence_logprobs(batch, batch_refs))
+            offset += len(batch)
 
         return torch.cat(logprobs, dim=0)
 
@@ -824,7 +824,9 @@ class Model:
         """
         all_ids: list[Tensor] = []
         all_masks: list[Tensor] = []
-        pad_id = self.tokenizer.pad_token_id or 0
+        pad_id = self.tokenizer.pad_token_id
+        if pad_id is None:
+            pad_id = self.tokenizer.eos_token_id or 0
 
         for batch in batchify(prompts, self.settings.batch_size):
             inputs, outputs = self.generate(
