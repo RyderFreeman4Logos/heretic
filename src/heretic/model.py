@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Type, cast
 
 import bitsandbytes as bnb
+import numpy as np
 import torch
 import torch.linalg as LA
 import torch.nn.functional as F
@@ -814,6 +815,88 @@ class Model:
             offset += len(batch)
 
         return torch.cat(logprobs, dim=0)
+
+    def save_sequence_logprobs_to_disk(
+        self, prompts: list[Prompt], reference_ids: Tensor, filepath: str
+    ) -> tuple[int, ...]:
+        """Compute base logprobs batch-by-batch and write to a memory-mapped file.
+
+        For large-vocab models (e.g. Qwen3.5 with 248K vocab), the full
+        logprobs tensor for thousands of prompts can exceed physical memory.
+        Writing to disk and streaming back during KL computation avoids OOM.
+        """
+        kl_batch_size = min(self.settings.batch_size, 32)
+        fp = None
+        shape: tuple[int, ...] = ()
+        offset = 0
+
+        for batch in batchify(prompts, kl_batch_size):
+            batch_refs = reference_ids[offset : offset + len(batch)]
+            logprobs = self.get_sequence_logprobs(batch, batch_refs)
+
+            if fp is None:
+                shape = (len(prompts), logprobs.shape[1], logprobs.shape[2])
+                fp = np.memmap(filepath, dtype="float16", mode="w+", shape=shape)
+
+            fp[offset : offset + len(batch)] = logprobs.cpu().to(torch.float16).numpy()
+            del logprobs
+            empty_cache()
+            offset += len(batch)
+
+        if fp is not None:
+            fp.flush()
+            del fp
+
+        return shape
+
+    def compute_sequence_kl_streaming(
+        self,
+        prompts: list[Prompt],
+        reference_ids: Tensor,
+        reference_mask: Tensor,
+        base_logprobs_file: str,
+        base_logprobs_shape: tuple[int, ...],
+    ) -> float:
+        """Compute sequence KL divergence by streaming through disk-backed base logprobs.
+
+        Only one batch of base + trial logprobs is in GPU memory at a time,
+        keeping peak usage at ~2× single-batch size instead of 2× full dataset.
+        """
+        kl_batch_size = min(self.settings.batch_size, 32)
+        base_fp = np.memmap(
+            base_logprobs_file, dtype="float16", mode="r", shape=base_logprobs_shape
+        )
+
+        kl_sum = 0.0
+        n_positions = 0
+        offset = 0
+
+        for batch in batchify(prompts, kl_batch_size):
+            batch_size = len(batch)
+            batch_refs = reference_ids[offset : offset + batch_size]
+
+            trial_logprobs = self.get_sequence_logprobs(batch, batch_refs)
+
+            base_chunk = torch.from_numpy(
+                base_fp[offset : offset + batch_size].copy()
+            ).to(device=trial_logprobs.device, dtype=trial_logprobs.dtype)
+
+            kl_per_pos = F.kl_div(
+                trial_logprobs, base_chunk, reduction="none", log_target=True
+            ).sum(dim=-1)
+
+            batch_mask = reference_mask[offset : offset + batch_size].to(
+                device=kl_per_pos.device, dtype=kl_per_pos.dtype
+            )
+            kl_sum += (kl_per_pos * batch_mask).sum().item()
+            n_positions += batch_mask.sum().item()
+
+            del trial_logprobs, base_chunk, kl_per_pos
+            empty_cache()
+            offset += batch_size
+
+        del base_fp
+        return kl_sum / n_positions if n_positions > 0 else 0.0
 
     def generate_reference_ids(
         self, prompts: list[Prompt], seq_length: int

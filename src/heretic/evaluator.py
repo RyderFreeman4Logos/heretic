@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import atexit
 import logging
+import os
+import tempfile
 from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError
 from dataclasses import dataclass
 
@@ -182,10 +184,16 @@ class Evaluator:
             self.reference_ids, self.reference_mask = model.generate_reference_ids(
                 self.good_prompts, settings.kl_sequence_length
             )
-            print("* Obtaining sequence-level probability distributions...")
-            self.base_logprobs = model.get_sequence_logprobs_batched(
-                self.good_prompts, self.reference_ids
+            print("* Saving base sequence-level probability distributions to disk...")
+            fd, self._base_logprobs_file = tempfile.mkstemp(
+                suffix=".dat", prefix="heretic_base_logprobs_"
             )
+            os.close(fd)
+            self._base_logprobs_shape = model.save_sequence_logprobs_to_disk(
+                self.good_prompts, self.reference_ids, self._base_logprobs_file
+            )
+            atexit.register(self._cleanup_logprobs_file)
+            self.base_logprobs = None  # type: ignore[assignment]
         else:
             self.reference_ids = None
             self.reference_mask = None
@@ -265,6 +273,11 @@ class Evaluator:
                     "Thinking evaluation will be skipped."
                 )
                 self._thinking_eval_active = False
+
+    def _cleanup_logprobs_file(self) -> None:
+        path = getattr(self, "_base_logprobs_file", None)
+        if path and os.path.exists(path):
+            os.unlink(path)
 
     def _try_llm_judge(self, responses: list[str]) -> list[bool] | None:
         """Attempt LLM judge classification. Returns None on failure."""
@@ -385,19 +398,14 @@ class Evaluator:
         if self.settings.kl_mode == KlMode.SEQUENCE:
             assert self.reference_ids is not None
             assert self.reference_mask is not None
-            print("  * Obtaining sequence-level probability distributions...")
-            logprobs = self.model.get_sequence_logprobs_batched(
+            print("  * Computing streaming sequence-level KL divergence...")
+            kl_divergence = self.model.compute_sequence_kl_streaming(
                 self.good_prompts,
                 self.reference_ids,
+                self.reference_mask,
+                self._base_logprobs_file,
+                self._base_logprobs_shape,
             )
-            # Per-position KL summed over vocab, masked to exclude padding positions.
-            kl_per_pos = F.kl_div(
-                logprobs, self.base_logprobs, reduction="none", log_target=True
-            ).sum(dim=-1)
-            mask = self.reference_mask.to(
-                device=kl_per_pos.device, dtype=kl_per_pos.dtype
-            )
-            kl_divergence = (kl_per_pos * mask).sum().item() / mask.sum().item()
         else:
             print("  * Obtaining first-token probability distributions...")
             logprobs = self.model.get_logprobs_batched(self.good_prompts)
