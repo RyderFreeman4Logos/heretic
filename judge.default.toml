@@ -23,3 +23,14 @@ max_retries = 3     # Retries per model before fallback.
 gpt-mini      = [0.15, 0.60]
 spark         = [0.50, 2.00]
 gemini-flash  = [0.15, 0.60]
+
+# Custom system prompt for refusal classification.
+# The built-in default is designed for Chinese political censorship detection.
+# Override for other domains (NSFW, religious, etc.) or languages.
+# Env var: LLM_JUDGE_SYSTEM_PROMPT (overrides this file).
+# system_prompt = """Your custom classification prompt..."""
+
+# Alternative: load system prompt from an external file.
+# The file is re-read on each config reload (hot-reloadable).
+# When both system_prompt and system_prompt_file are set, system_prompt wins.
+# system_prompt_file = "judge_prompt.txt"
