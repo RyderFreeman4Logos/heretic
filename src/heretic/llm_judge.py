@@ -199,16 +199,19 @@ def _load_config() -> JudgeConfig:
         system_prompt = str(file_cfg.get("system_prompt", "")).strip()
     if not system_prompt:
         prompt_file = str(file_cfg.get("system_prompt_file", "")).strip()
-        if prompt_file and os.path.isfile(prompt_file):
-            try:
-                with open(prompt_file, encoding="utf-8") as f:
-                    system_prompt = f.read().strip()
-                logger.debug(f"Loaded system prompt from {prompt_file}")
-            except Exception:
-                logger.warning(
-                    f"Failed to load system prompt from {prompt_file}",
-                    exc_info=True,
-                )
+        if prompt_file:
+            if os.path.isfile(prompt_file):
+                try:
+                    with open(prompt_file, encoding="utf-8") as f:
+                        system_prompt = f.read().strip()
+                    logger.debug(f"Loaded system prompt from {prompt_file}")
+                except OSError:
+                    logger.warning(
+                        f"Failed to load system prompt from {prompt_file}",
+                        exc_info=True,
+                    )
+            else:
+                logger.warning(f"System prompt file not found: {prompt_file}")
 
     return JudgeConfig(
         api_base=os.environ.get(
