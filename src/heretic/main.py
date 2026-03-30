@@ -456,6 +456,7 @@ def run():
                     # We cannot recover from this.
                     raise
 
+                empty_cache()
                 print(f"[red]Failed[/] ({error})")
                 break
 
@@ -574,12 +575,13 @@ def run():
             ) from None
 
         def _per_layer_geometric_median(residuals: torch.Tensor) -> torch.Tensor:
+            device = residuals.device
             return torch.stack(
                 [
                     compute_geometric_median(residuals[:, i, :].detach().cpu()).median
                     for i in range(residuals.shape[1])
                 ]
-            )
+            ).to(device)
 
         good_center = _per_layer_geometric_median(good_residuals)
         bad_center = _per_layer_geometric_median(bad_residuals)
