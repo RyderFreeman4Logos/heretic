@@ -16,6 +16,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from heretic.model import Model
 from heretic.utils import Prompt
 
 # ---------------------------------------------------------------------------
@@ -76,7 +77,7 @@ def _make_mock_model(
 
 
 class TestSequenceLogprobsOffset:
-    def test_extracts_logits_at_correct_positions(self) -> None:
+    def test_get_sequence_logprobs_known_logits_extracts_correct_slice(self) -> None:
         """Verify the offset slicing: logits[prompt_len-1 : prompt_len+seq_len-1]."""
         torch.manual_seed(42)
 
@@ -100,8 +101,6 @@ class TestSequenceLogprobsOffset:
         prompts = [Prompt(system="sys", user="usr")] * batch
         ref_ids = torch.zeros(batch, seq_len, dtype=torch.long)
 
-        from heretic.model import Model
-
         # Call the real method on the mock instance.
         result = Model.get_sequence_logprobs(mock, prompts, ref_ids)
 
@@ -119,7 +118,9 @@ class TestSequenceLogprobsOffset:
 
 
 class TestPaddingMaskExcludesPadTokens:
-    def test_only_unmasked_positions_contribute(self) -> None:
+    def test_compute_sequence_kl_streaming_masked_positions_excluded_from_average(
+        self,
+    ) -> None:
         """Masked (pad) positions must not affect the KL average."""
         torch.manual_seed(42)
 
@@ -163,8 +164,6 @@ class TestPaddingMaskExcludesPadTokens:
             prompts = [Prompt(system="sys", user="usr")] * batch
             ref_ids = torch.zeros(batch, seq_len, dtype=torch.long)
 
-            from heretic.model import Model
-
             result = Model.compute_sequence_kl_streaming(
                 mock,
                 prompts,
@@ -185,7 +184,9 @@ class TestPaddingMaskExcludesPadTokens:
 
 
 class TestKlZeroWhenIdentical:
-    def test_identical_distributions_yield_zero_kl(self) -> None:
+    def test_compute_sequence_kl_streaming_identical_distributions_returns_zero(
+        self,
+    ) -> None:
         """When trial == base logprobs, KL divergence must be approximately 0."""
         torch.manual_seed(42)
 
@@ -217,8 +218,6 @@ class TestKlZeroWhenIdentical:
             prompts = [Prompt(system="sys", user="usr")] * batch
             ref_ids = torch.zeros(batch, seq_len, dtype=torch.long)
 
-            from heretic.model import Model
-
             result = Model.compute_sequence_kl_streaming(
                 mock,
                 prompts,
@@ -238,7 +237,7 @@ class TestKlZeroWhenIdentical:
 
 
 class TestPadTokenFallback:
-    def test_uses_eos_when_pad_is_none(self) -> None:
+    def test_generate_reference_ids_no_pad_token_uses_eos(self) -> None:
         """generate_reference_ids must fall back to eos_token_id when pad is None."""
         torch.manual_seed(42)
 
@@ -262,8 +261,6 @@ class TestPadTokenFallback:
         mock.generate = MagicMock(return_value=({"input_ids": input_ids}, outputs))
 
         prompts = [Prompt(system="sys", user="usr")]
-
-        from heretic.model import Model
 
         ref_ids, ref_mask = Model.generate_reference_ids(mock, prompts, seq_length)
 
