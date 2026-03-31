@@ -85,6 +85,7 @@ module-name = "heretic"
 [[tool.uv.index]]
 name = "pytorch-cuda"
 url = "https://download.pytorch.org/whl/cu126"
+explicit = true
 
 [tool.uv.sources]
 torch = { index = "pytorch-cuda" }
