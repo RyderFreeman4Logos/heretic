@@ -222,13 +222,17 @@ class Model:
 
     @staticmethod
     def _patch_vlm_rope_deltas() -> None:
-        """Monkey-patch VLM compute_3d_position_ids to handle 0-size rope_deltas.
+        """Monkey-patch VLM compute_3d_position_ids for text-only inference.
 
-        VLMs like Qwen3.5 re-set rope_deltas on every forward pass. For text-only
-        inputs this produces a 0-size tensor that causes broadcast failures on CUDA
-        (CPU silently handles 0-size repeat_interleave). Patching the method itself
-        rather than clearing at init is necessary because forward() undoes any
-        init-time clear.
+        VLMs like Qwen3.5 store rope_deltas (vision-text position offsets) on
+        every forward pass. For text-only inference (Heretic's use case), these
+        deltas are meaningless (all zeros) but retain the batch dimension of the
+        last forward call. When subsequent calls use a different batch size
+        (e.g., generate batch=208 then KL batch=32), repeat_interleave produces
+        a 0-size tensor that crashes on CUDA broadcast.
+
+        Fix: unconditionally clear rope_deltas before each call, forcing the
+        model to fall through to standard 1D position IDs.
         """
         try:
             import transformers.models.qwen3_5.modeling_qwen3_5 as qwen3_5_mod
@@ -242,8 +246,7 @@ class Model:
         _orig = target.compute_3d_position_ids
 
         def _patched(self, *args, **kwargs):
-            if self.rope_deltas is not None and self.rope_deltas.numel() == 0:
-                self.rope_deltas = None
+            self.rope_deltas = None
             return _orig(self, *args, **kwargs)
 
         _patched._heretic_patched = True  # ty:ignore[unresolved-attribute]
