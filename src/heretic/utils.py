@@ -148,16 +148,17 @@ def prompt_password(message: str) -> str:
 
 
 def format_duration(seconds: float) -> str:
-    seconds = round(seconds)
-    hours, seconds = divmod(seconds, 3600)
-    minutes, seconds = divmod(seconds, 60)
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+
+    total = round(seconds)
+    hours, total = divmod(total, 3600)
+    minutes, total = divmod(total, 60)
 
     if hours > 0:
         return f"{hours}h {minutes}m"
-    elif minutes > 0:
-        return f"{minutes}m {seconds}s"
     else:
-        return f"{seconds}s"
+        return f"{minutes}m {total}s"
 
 
 @dataclass

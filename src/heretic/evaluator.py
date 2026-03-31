@@ -7,6 +7,7 @@ import atexit
 import logging
 import os
 import tempfile
+import time
 from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError
 from dataclasses import dataclass
 
@@ -15,7 +16,7 @@ from torch import Tensor
 
 from .config import KlMode, Settings
 from .model import Model
-from .utils import Prompt, load_prompts, print
+from .utils import Prompt, format_duration, load_prompts, print
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,8 @@ class PendingScore:
         thinking_completion_rate: float | None = None,
         thinking_failures: int | None = None,
         thinking_samples: int = 0,
+        phase_times: dict[str, float] | None = None,
+        judge_submit_time: float | None = None,
     ) -> None:
         self._evaluator = evaluator
         self.kl_divergence = kl_divergence
@@ -52,6 +55,8 @@ class PendingScore:
         self._thinking_completion_rate = thinking_completion_rate
         self._thinking_failures = thinking_failures
         self._thinking_samples = thinking_samples
+        self.phase_times: dict[str, float] = phase_times or {}
+        self._judge_submit_time = judge_submit_time or time.monotonic()
 
     def resolve(self, timeout: float | None = None) -> TrialEvaluation:
         """Block until LLM judge completes and compute final evaluation.
@@ -65,6 +70,7 @@ class PendingScore:
 
         refusal_flags: list[bool] | None = None
         if self._judge_future is not None:
+            wait_start = time.monotonic()
             try:
                 refusal_flags = self._judge_future.result(timeout=timeout)
             except TimeoutError:
@@ -73,6 +79,20 @@ class PendingScore:
                 )
             except Exception:
                 logger.warning("Pipelined LLM judge raised", exc_info=True)
+            judge_wait = time.monotonic() - wait_start
+            judge_total = time.monotonic() - self._judge_submit_time
+            self.phase_times["judge_wait"] = judge_wait
+            self.phase_times["judge_total"] = judge_total
+            if judge_wait < 0.5:
+                print(
+                    f"  * LLM judge: resolved in {format_duration(judge_wait)} "
+                    f"(completed during prior phases)"
+                )
+            else:
+                print(
+                    f"  * LLM judge: waited {format_duration(judge_wait)} "
+                    f"(total {format_duration(judge_total)})"
+                )
 
         ev._last_used_llm_judge = refusal_flags is not None
 
@@ -379,26 +399,40 @@ class Evaluator:
             thinking_prompts: Subset of thinking prompts for this trial.
                               Pass None to skip thinking evaluation.
         """
+        phase_times: dict[str, float] = {}
+
         # GPU: generate responses for bad prompts.
-        print("  * Counting model refusals...")
+        n_bad = len(self.bad_prompts)
+        print(f"  * Generating responses [{n_bad} prompts]...", end=" ")
+        t0 = time.monotonic()
         responses = self.model.get_responses_batched(
             self.bad_prompts,
             skip_special_tokens=True,
         )
+        phase_times["gen"] = time.monotonic() - t0
+        print(f"done ({format_duration(phase_times['gen'])})")
 
         # Submit LLM judge to background thread (non-blocking).
         judge_future: Future[list[bool] | None] | None = None
+        judge_submit_time: float | None = None
         if self.settings.use_llm_judge:
             judge_future = self._judge_executor.submit(
                 self._try_llm_judge,
                 responses,
             )
+            judge_submit_time = time.monotonic()
+            print("  * LLM judge submitted (async)")
 
         # GPU: logprobs for good prompts (overlaps with LLM judge).
+        n_good = len(self.good_prompts)
         if self.settings.kl_mode == KlMode.SEQUENCE:
             assert self.reference_ids is not None
             assert self.reference_mask is not None
-            print("  * Computing streaming sequence-level KL divergence...")
+            print(
+                f"  * Computing streaming sequence-level KL divergence [{n_good} prompts]...",
+                end=" ",
+            )
+            t0 = time.monotonic()
             kl_divergence = self.model.compute_sequence_kl_streaming(
                 self.good_prompts,
                 self.reference_ids,
@@ -406,8 +440,14 @@ class Evaluator:
                 self._base_logprobs_file,
                 self._base_logprobs_shape,
             )
+            phase_times["kl"] = time.monotonic() - t0
+            print(f"done ({format_duration(phase_times['kl'])})")
         else:
-            print("  * Obtaining first-token probability distributions...")
+            print(
+                f"  * Computing first-token KL divergence [{n_good} prompts]...",
+                end=" ",
+            )
+            t0 = time.monotonic()
             logprobs = self.model.get_logprobs_batched(self.good_prompts)
             kl_divergence = F.kl_div(
                 logprobs,
@@ -415,6 +455,8 @@ class Evaluator:
                 reduction="batchmean",
                 log_target=True,
             ).item()
+            phase_times["kl"] = time.monotonic() - t0
+            print(f"done ({format_duration(phase_times['kl'])})")
         print(f"  * KL divergence: [bold]{kl_divergence:.4f}[/]")
 
         # GPU: secondary thinking pass (serial, but LLM judge runs in parallel).
@@ -422,12 +464,18 @@ class Evaluator:
         thinking_failures: int | None = None
         thinking_samples = 0
         if thinking_prompts:
-            print("  * Evaluating thinking chain completion...")
+            print(
+                f"  * Evaluating thinking chain completion [{len(thinking_prompts)} prompts]...",
+                end=" ",
+            )
+            t0 = time.monotonic()
             thinking_rate, thinking_failures, thinking_samples = self.evaluate_thinking(
                 thinking_prompts
             )
+            phase_times["thinking"] = time.monotonic() - t0
             pct = thinking_rate * 100
             completed = thinking_samples - thinking_failures
+            print(f"done ({format_duration(phase_times['thinking'])})")
             print(
                 f"  * Thinking evaluation: {completed}/{thinking_samples} "
                 f"complete ({pct:.1f}%)"
@@ -441,6 +489,8 @@ class Evaluator:
             thinking_completion_rate=thinking_rate,
             thinking_failures=thinking_failures,
             thinking_samples=thinking_samples,
+            phase_times=phase_times,
+            judge_submit_time=judge_submit_time,
         )
 
     def get_score(self) -> TrialEvaluation:
