@@ -4,13 +4,14 @@
 from __future__ import annotations
 
 import atexit
+import hashlib
+import json
 import logging
-import os
 import random
-import tempfile
 import time
 from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError
 from dataclasses import dataclass
+from pathlib import Path
 
 import torch.nn.functional as F
 from torch import Tensor
@@ -20,6 +21,9 @@ from .model import Model
 from .utils import Prompt, format_duration, load_prompts, print
 
 logger = logging.getLogger(__name__)
+
+# Bump this when cache-affecting logic changes (generation, logprobs, serialization).
+_CACHE_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -214,19 +218,35 @@ class Evaluator:
             print(f"* [bold]{total_good}[/] prompts loaded")
 
         if settings.kl_mode == KlMode.SEQUENCE:
-            print("* Generating reference responses for sequence-level KL...")
-            self.reference_ids, self.reference_mask = model.generate_reference_ids(
-                self.good_prompts, settings.kl_sequence_length
-            )
-            print("* Saving base sequence-level probability distributions to disk...")
-            fd, self._base_logprobs_file = tempfile.mkstemp(
-                suffix=".dat", prefix="heretic_base_logprobs_"
-            )
-            os.close(fd)
-            self._base_logprobs_shape = model.save_sequence_logprobs_to_disk(
-                self.good_prompts, self.reference_ids, self._base_logprobs_file
-            )
-            atexit.register(self._cleanup_logprobs_file)
+            cache_key = self._compute_baseline_cache_key()
+            cached = self._try_load_baseline_cache(cache_key)
+            if cached is not None:
+                ref_ids, ref_mask, dat_path, logprobs_shape = cached
+                self.reference_ids = ref_ids
+                self.reference_mask = ref_mask
+                self._base_logprobs_file = dat_path
+                self._base_logprobs_shape = logprobs_shape
+                print("* [bold green]Loaded cached[/] sequence KL baseline")
+            else:
+                print("* Generating reference responses for sequence-level KL...")
+                self.reference_ids, self.reference_mask = model.generate_reference_ids(
+                    self.good_prompts, settings.kl_sequence_length
+                )
+                _, dat_path_obj = self._baseline_cache_paths(cache_key)
+                dat_path_obj.parent.mkdir(parents=True, exist_ok=True)
+                self._base_logprobs_file = str(dat_path_obj)
+                print(
+                    "* Saving base sequence-level probability distributions to disk..."
+                )
+                self._base_logprobs_shape = model.save_sequence_logprobs_to_disk(
+                    self.good_prompts, self.reference_ids, self._base_logprobs_file
+                )
+                self._save_baseline_cache(
+                    cache_key,
+                    self.reference_ids,
+                    self.reference_mask,
+                    self._base_logprobs_shape,
+                )
             self.base_logprobs = None  # type: ignore[assignment]
         else:
             self.reference_ids = None
@@ -321,10 +341,85 @@ class Evaluator:
                 )
                 self._thinking_eval_active = False
 
-    def _cleanup_logprobs_file(self) -> None:
-        path = getattr(self, "_base_logprobs_file", None)
-        if path and os.path.exists(path):
-            os.unlink(path)
+    def _compute_baseline_cache_key(self) -> str:
+        """Compute a deterministic cache key for the sequence KL baseline."""
+        ds = self.settings.good_evaluation_prompts
+        resolved_system_prompt = (
+            ds.system_prompt
+            if ds.system_prompt is not None
+            else self.settings.system_prompt
+        )
+        key_data = {
+            "cache_version": _CACHE_VERSION,
+            "model": self.settings.model,
+            "quantization": self.settings.quantization.value,
+            "kl_sequence_length": self.settings.kl_sequence_length,
+            "max_good_eval_prompts": self.settings.max_good_eval_prompts,
+            "dataset": ds.dataset,
+            "split": ds.split,
+            "column": ds.column,
+            "prefix": ds.prefix,
+            "suffix": ds.suffix,
+            "system_prompt": resolved_system_prompt,
+        }
+        canonical = json.dumps(key_data, sort_keys=True)
+        return hashlib.sha256(canonical.encode()).hexdigest()
+
+    def _baseline_cache_paths(self, cache_key: str) -> tuple[Path, Path]:
+        """Return (pt_path, dat_path) for a given cache key."""
+        stem = f"kl_baseline_{cache_key[:16]}"
+        pt_path = Path("checkpoints") / f"{stem}.pt"
+        dat_path = Path("checkpoints") / f"{stem}.dat"
+        return pt_path, dat_path
+
+    def _try_load_baseline_cache(
+        self, cache_key: str
+    ) -> tuple[Tensor, Tensor, str, tuple[int, ...]] | None:
+        """Try loading cached baseline. Returns None on cache miss."""
+        pt_path, dat_path = self._baseline_cache_paths(cache_key)
+        if not pt_path.exists() or not dat_path.exists():
+            return None
+        try:
+            import torch
+
+            data = torch.load(pt_path, map_location="cpu", weights_only=True)
+            if data.get("cache_key") != cache_key:
+                logger.warning("Cache key mismatch in %s, ignoring", pt_path)
+                return None
+            return (
+                data["reference_ids"],
+                data["reference_mask"],
+                str(dat_path),
+                tuple(data["logprobs_shape"]),
+            )
+        except (RuntimeError, KeyError, OSError, EOFError, ValueError):
+            logger.warning(
+                "Failed to load baseline cache from %s", pt_path, exc_info=True
+            )
+            return None
+
+    def _save_baseline_cache(
+        self,
+        cache_key: str,
+        reference_ids: Tensor,
+        reference_mask: Tensor,
+        logprobs_shape: tuple[int, ...],
+    ) -> None:
+        """Persist baseline tensors and metadata for future runs."""
+        import torch
+
+        pt_path, _ = self._baseline_cache_paths(cache_key)
+        pt_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(
+            {
+                "cache_key": cache_key,
+                "reference_ids": reference_ids,
+                "reference_mask": reference_mask,
+                "logprobs_shape": logprobs_shape,
+            },
+            pt_path,
+        )
+        logger.info("Sequence KL baseline cache saved to %s", pt_path)
 
     def _try_llm_judge(self, responses: list[str]) -> list[bool] | None:
         """Attempt LLM judge classification. Returns None on failure."""
