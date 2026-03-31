@@ -78,3 +78,14 @@ build-backend = "uv_build"
 
 [tool.uv.build-backend]
 module-name = "heretic"
+
+# Prefer CUDA-enabled PyTorch wheels over PyPI's CPU-only default.
+# cu126 targets CUDA 12.6+ (broadest modern compatibility).
+# Override locally with uv.toml for other CUDA versions or CPU-only.
+[[tool.uv.index]]
+name = "pytorch-cuda"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cuda" }
