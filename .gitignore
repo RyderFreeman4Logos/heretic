@@ -27,3 +27,10 @@ wheels/
 
 # Residual plots
 /plots/
+
+# Local overrides
+/uv.toml
+
+# Test artifacts
+.test
+*.db
