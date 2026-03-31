@@ -241,7 +241,7 @@ class Model:
 
         _orig = target.compute_3d_position_ids
 
-        def _patched(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        def _patched(self, *args, **kwargs):
             if self.rope_deltas is not None and self.rope_deltas.numel() == 0:
                 self.rope_deltas = None
             return _orig(self, *args, **kwargs)
