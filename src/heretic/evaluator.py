@@ -22,6 +22,9 @@ from .utils import Prompt, format_duration, load_prompts, print
 
 logger = logging.getLogger(__name__)
 
+# Bump this when cache-affecting logic changes (generation, logprobs, serialization).
+_CACHE_VERSION = 1
+
 
 @dataclass(frozen=True)
 class TrialEvaluation:
@@ -347,6 +350,7 @@ class Evaluator:
             else self.settings.system_prompt
         )
         key_data = {
+            "cache_version": _CACHE_VERSION,
             "model": self.settings.model,
             "quantization": self.settings.quantization.value,
             "kl_sequence_length": self.settings.kl_sequence_length,
