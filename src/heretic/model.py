@@ -156,6 +156,7 @@ class Model:
             raise Exception("Failed to load model with all configured dtypes.")
 
         self._apply_lora()
+        self._clear_rope_deltas()
 
         # LoRA B matrices are initialized to zero by default in PEFT,
         # so we don't need to do anything manually.
@@ -218,6 +219,20 @@ class Model:
         self.model = cast(PeftModel, get_peft_model(self.model, self.peft_config))
 
         print(f"* LoRA adapters initialized (targets: {', '.join(target_modules)})")
+
+    def _clear_rope_deltas(self) -> None:
+        """Clear rope_deltas on VLMs to prevent crashes during text-only inference.
+
+        VLMs like Qwen3.5 set rope_deltas for vision-token position offsets.
+        During text-only inference this tensor can have a 0-size dimension that
+        causes broadcast failures in torch >= 2.11. Setting it to None makes the
+        model fall back to standard position_ids computation.
+        """
+        base = self.model
+        if isinstance(base, PeftModel):
+            base = base.base_model.model
+        if hasattr(base, "rope_deltas"):
+            base.rope_deltas = None  # ty:ignore[invalid-assignment]
 
     def _get_quantization_config(self, dtype: str) -> BitsAndBytesConfig | None:
         """
@@ -306,6 +321,7 @@ class Model:
             for name, module in self.model.named_modules():
                 if "lora_B" in name and hasattr(module, "weight"):
                     torch.nn.init.zeros_(module.weight)
+            self._clear_rope_deltas()
             return
 
         dtype = self.model.dtype
@@ -331,6 +347,7 @@ class Model:
         )
 
         self._apply_lora()
+        self._clear_rope_deltas()
 
         self.needs_reload = False
 
