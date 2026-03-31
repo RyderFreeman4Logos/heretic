@@ -444,6 +444,7 @@ class Settings(BaseSettings):
 
     max_good_eval_prompts: int = Field(
         default=0,
+        ge=0,
         description=(
             "Maximum number of good evaluation prompts to use (0 = use all). "
             "When set to N > 0, a random sample of N prompts is drawn from the "
@@ -453,6 +454,7 @@ class Settings(BaseSettings):
 
     max_bad_eval_prompts: int = Field(
         default=0,
+        ge=0,
         description=(
             "Maximum number of bad evaluation prompts to use (0 = use all). "
             "When set to N > 0, a random sample of N prompts is drawn from the "
