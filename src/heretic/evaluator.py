@@ -46,6 +46,7 @@ class PendingScore:
         thinking_failures: int | None = None,
         thinking_samples: int = 0,
         phase_times: dict[str, float] | None = None,
+        judge_submit_time: float | None = None,
     ) -> None:
         self._evaluator = evaluator
         self.kl_divergence = kl_divergence
@@ -55,7 +56,7 @@ class PendingScore:
         self._thinking_failures = thinking_failures
         self._thinking_samples = thinking_samples
         self.phase_times: dict[str, float] = phase_times or {}
-        self._judge_submit_time = time.monotonic()
+        self._judge_submit_time = judge_submit_time or time.monotonic()
 
     def resolve(self, timeout: float | None = None) -> TrialEvaluation:
         """Block until LLM judge completes and compute final evaluation.
@@ -413,11 +414,13 @@ class Evaluator:
 
         # Submit LLM judge to background thread (non-blocking).
         judge_future: Future[list[bool] | None] | None = None
+        judge_submit_time: float | None = None
         if self.settings.use_llm_judge:
             judge_future = self._judge_executor.submit(
                 self._try_llm_judge,
                 responses,
             )
+            judge_submit_time = time.monotonic()
             print("  * LLM judge submitted (async)")
 
         # GPU: logprobs for good prompts (overlaps with LLM judge).
@@ -487,6 +490,7 @@ class Evaluator:
             thinking_failures=thinking_failures,
             thinking_samples=thinking_samples,
             phase_times=phase_times,
+            judge_submit_time=judge_submit_time,
         )
 
     def get_score(self) -> TrialEvaluation:

@@ -717,7 +717,9 @@ def run():
         phases.update(pending_score.phase_times)
 
         # Print trial timing summary.
-        total = sum(phases.values())
+        # Exclude judge_total — it overlaps with kl/thinking (concurrent).
+        sequential_keys = ("gen", "kl", "reset", "abliterate", "thinking", "judge_wait")
+        total = sum(phases.get(k, 0.0) for k in sequential_keys)
         if total > 0:
             parts: list[str] = []
             for label in ("gen", "kl", "reset", "abliterate", "thinking", "judge_wait"):
