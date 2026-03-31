@@ -691,21 +691,49 @@ def run():
         print("* Parameters:")
         for name, value in get_trial_parameters(trial).items():
             print(f"  * {name} = [bold]{value}[/]")
-        print("* Resetting model...")
+        print("* Resetting model...", end=" ")
+        t0 = time.monotonic()
         model.reset_model()
-        print("* Abliterating...")
+        trial_phase_times["reset"] = time.monotonic() - t0
+        print(f"done ({format_duration(trial_phase_times['reset'])})")
+        print("* Abliterating...", end=" ")
+        t0 = time.monotonic()
         model.abliterate(refusal_directions, direction_index, parameters)
+        trial_phase_times["abliterate"] = time.monotonic() - t0
+        print(f"done ({format_duration(trial_phase_times['abliterate'])})")
 
     def resolve_pending(
-        pending: tuple[PendingScore, Trial, int] | None,
+        pending: tuple[PendingScore, Trial, int, dict[str, float]] | None,
         timeout: float | None = None,
     ) -> None:
         """Resolve a pipelined evaluation and report score to Optuna."""
         if pending is None:
             return
-        pending_score, prev_trial, prev_idx = pending
+        pending_score, prev_trial, prev_idx, phases = pending
         result = pending_score.resolve(timeout=timeout)
         print(f"  * Refusals: [bold]{result.refusals}[/]/{len(evaluator.bad_prompts)}")
+
+        # Merge evaluator phase times into the trial phases.
+        phases.update(pending_score.phase_times)
+
+        # Print trial timing summary.
+        total = sum(phases.values())
+        if total > 0:
+            parts: list[str] = []
+            for label in ("gen", "kl", "reset", "abliterate", "thinking", "judge_wait"):
+                if label in phases:
+                    pct = phases[label] / total * 100
+                    parts.append(f"{label}: {pct:.0f}%")
+            other = total - sum(
+                phases.get(k, 0.0)
+                for k in ("gen", "kl", "reset", "abliterate", "thinking", "judge_wait")
+            )
+            if other > 0.5:
+                parts.append(f"other: {other / total * 100:.0f}%")
+            print(
+                f"* Trial {prev_idx} total: [bold]{format_duration(total)}[/] "
+                f"({', '.join(parts)})"
+            )
 
         elapsed_time = time.perf_counter() - start_time
         print()
@@ -841,7 +869,9 @@ def run():
 
     # Pipelined ask/tell loop: trial N's LLM judge runs concurrently with
     # trial N+1's GPU work (reset + abliterate + generate + logprobs).
-    pending: tuple[PendingScore, Trial, int] | None = None
+    # Tuple: (PendingScore, Trial, trial_index, trial_phase_times)
+    pending: tuple[PendingScore, Trial, int, dict[str, float]] | None = None
+    trial_phase_times: dict[str, float] = {}
     # Track the current trial separately so we can fail it on interrupt.
     current_trial: Trial | None = None
 
@@ -849,7 +879,7 @@ def run():
         """Fail any trials left in RUNNING state after interruption or error."""
         nonlocal pending, current_trial
         if pending is not None:
-            _, pending_trial, _ = pending
+            _, pending_trial, _, _ = pending
             try:
                 resolve_pending(pending, timeout=5.0)
             except Exception:
@@ -866,12 +896,13 @@ def run():
 
     def _run_trial_loop() -> None:
         """Execute pipelined ask/tell loop for remaining trials."""
-        nonlocal pending, current_trial, trial_index
+        nonlocal pending, current_trial, trial_index, trial_phase_times
         pending = None
         current_trial = None
         try:
             n_remaining = settings.n_trials - count_completed_trials()
             for _ in range(n_remaining):
+                trial_phase_times = {}
                 current_trial = study.ask()
                 trial_index += 1
                 current_trial.set_user_attr("index", trial_index)
@@ -886,7 +917,7 @@ def run():
                 # Resolve PREVIOUS trial's LLM judge (ran during this trial's GPU work).
                 resolve_pending(pending)
 
-                pending = (new_pending, current_trial, trial_index)
+                pending = (new_pending, current_trial, trial_index, trial_phase_times)
                 current_trial = None  # Now tracked via pending.
 
             # Flush last trial.
