@@ -7,7 +7,6 @@ import atexit
 import hashlib
 import json
 import logging
-import os
 import random
 import time
 from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError
@@ -379,7 +378,7 @@ class Evaluator:
         try:
             import torch
 
-            data = torch.load(pt_path, map_location="cpu", weights_only=False)
+            data = torch.load(pt_path, map_location="cpu", weights_only=True)
             if data.get("cache_key") != cache_key:
                 logger.warning("Cache key mismatch in %s, ignoring", pt_path)
                 return None
@@ -389,7 +388,7 @@ class Evaluator:
                 str(dat_path),
                 tuple(data["logprobs_shape"]),
             )
-        except Exception:
+        except (RuntimeError, KeyError, OSError, EOFError, ValueError):
             logger.warning(
                 "Failed to load baseline cache from %s", pt_path, exc_info=True
             )
@@ -417,11 +416,6 @@ class Evaluator:
             pt_path,
         )
         logger.info("Sequence KL baseline cache saved to %s", pt_path)
-
-    def _cleanup_logprobs_file(self) -> None:
-        path = getattr(self, "_base_logprobs_file", None)
-        if path and os.path.exists(path):
-            os.unlink(path)
 
     def _try_llm_judge(self, responses: list[str]) -> list[bool] | None:
         """Attempt LLM judge classification. Returns None on failure."""
