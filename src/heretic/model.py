@@ -156,7 +156,7 @@ class Model:
             raise Exception("Failed to load model with all configured dtypes.")
 
         self._apply_lora()
-        self._clear_rope_deltas()
+        self._patch_vlm_rope_deltas()
 
         # LoRA B matrices are initialized to zero by default in PEFT,
         # so we don't need to do anything manually.
@@ -220,19 +220,34 @@ class Model:
 
         print(f"* LoRA adapters initialized (targets: {', '.join(target_modules)})")
 
-    def _clear_rope_deltas(self) -> None:
-        """Clear rope_deltas on VLMs to prevent crashes during text-only inference.
+    @staticmethod
+    def _patch_vlm_rope_deltas() -> None:
+        """Monkey-patch VLM compute_3d_position_ids to handle 0-size rope_deltas.
 
-        VLMs like Qwen3.5 set rope_deltas for vision-token position offsets.
-        During text-only inference this tensor can have a 0-size dimension that
-        causes broadcast failures in torch >= 2.11. Setting it to None makes the
-        model fall back to standard position_ids computation.
+        VLMs like Qwen3.5 re-set rope_deltas on every forward pass. For text-only
+        inputs this produces a 0-size tensor that causes broadcast failures on CUDA
+        (CPU silently handles 0-size repeat_interleave). Patching the method itself
+        rather than clearing at init is necessary because forward() undoes any
+        init-time clear.
         """
-        base = self.model
-        if isinstance(base, PeftModel):
-            base = base.base_model.model
-        if hasattr(base, "rope_deltas"):
-            base.rope_deltas = None  # ty:ignore[invalid-assignment]
+        try:
+            import transformers.models.qwen3_5.modeling_qwen3_5 as qwen3_5_mod
+        except ImportError:
+            return
+
+        target = qwen3_5_mod.Qwen3_5Model
+        if getattr(target.compute_3d_position_ids, "_heretic_patched", False):
+            return
+
+        _orig = target.compute_3d_position_ids
+
+        def _patched(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+            if self.rope_deltas is not None and self.rope_deltas.numel() == 0:
+                self.rope_deltas = None
+            return _orig(self, *args, **kwargs)
+
+        _patched._heretic_patched = True  # ty:ignore[unresolved-attribute]
+        target.compute_3d_position_ids = _patched  # ty:ignore[invalid-assignment]
 
     def _get_quantization_config(self, dtype: str) -> BitsAndBytesConfig | None:
         """
@@ -321,7 +336,7 @@ class Model:
             for name, module in self.model.named_modules():
                 if "lora_B" in name and hasattr(module, "weight"):
                     torch.nn.init.zeros_(module.weight)
-            self._clear_rope_deltas()
+            self._patch_vlm_rope_deltas()
             return
 
         dtype = self.model.dtype
@@ -347,7 +362,7 @@ class Model:
         )
 
         self._apply_lora()
-        self._clear_rope_deltas()
+        self._patch_vlm_rope_deltas()
 
         self.needs_reload = False
 
