@@ -6,6 +6,7 @@ from __future__ import annotations
 import atexit
 import logging
 import os
+import random
 import tempfile
 import time
 from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError
@@ -197,7 +198,20 @@ class Evaluator:
             f"Loading good evaluation prompts from [bold]{settings.good_evaluation_prompts.dataset}[/]..."
         )
         self.good_prompts = load_prompts(settings, settings.good_evaluation_prompts)
-        print(f"* [bold]{len(self.good_prompts)}[/] prompts loaded")
+        total_good = len(self.good_prompts)
+        if (
+            settings.max_good_eval_prompts > 0
+            and settings.max_good_eval_prompts < total_good
+        ):
+            rng = random.Random(42)
+            self.good_prompts = rng.sample(
+                self.good_prompts, settings.max_good_eval_prompts
+            )
+            print(
+                f"* [bold]{len(self.good_prompts)}[/]/{total_good} prompts loaded (sampled)"
+            )
+        else:
+            print(f"* [bold]{total_good}[/] prompts loaded")
 
         if settings.kl_mode == KlMode.SEQUENCE:
             print("* Generating reference responses for sequence-level KL...")
@@ -225,7 +239,20 @@ class Evaluator:
             f"Loading bad evaluation prompts from [bold]{settings.bad_evaluation_prompts.dataset}[/]..."
         )
         self.bad_prompts = load_prompts(settings, settings.bad_evaluation_prompts)
-        print(f"* [bold]{len(self.bad_prompts)}[/] prompts loaded")
+        total_bad = len(self.bad_prompts)
+        if (
+            settings.max_bad_eval_prompts > 0
+            and settings.max_bad_eval_prompts < total_bad
+        ):
+            rng = random.Random(42)
+            self.bad_prompts = rng.sample(
+                self.bad_prompts, settings.max_bad_eval_prompts
+            )
+            print(
+                f"* [bold]{len(self.bad_prompts)}[/]/{total_bad} prompts loaded (sampled)"
+            )
+        else:
+            print(f"* [bold]{total_bad}[/] prompts loaded")
 
         print("* Counting model refusals...")
         base_responses = model.get_responses_batched(

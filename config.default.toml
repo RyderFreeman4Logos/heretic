@@ -191,6 +191,16 @@ column = "text"
 residual_plot_label = '"Harmful" prompts'
 residual_plot_color = "darkorange"
 
+# Maximum number of good evaluation prompts to use (0 = use all).
+# When set to N > 0, a random sample of N prompts is drawn from the loaded
+# dataset with a fixed seed for reproducibility. Useful for speeding up trials
+# when using very large evaluation datasets.
+max_good_eval_prompts = 0
+
+# Maximum number of bad evaluation prompts to use (0 = use all).
+# Same semantics as max_good_eval_prompts but for the "harmful" prompt set.
+max_bad_eval_prompts = 0
+
 # Dataset of prompts that tend to not result in refusals (used for evaluating model performance).
 [good_evaluation_prompts]
 dataset = "mlabonne/harmless_alpaca"
