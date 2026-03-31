@@ -442,6 +442,24 @@ class Settings(BaseSettings):
         description="Dataset of prompts that tend to result in refusals (used for calculating refusal directions).",
     )
 
+    max_good_eval_prompts: int = Field(
+        default=0,
+        description=(
+            "Maximum number of good evaluation prompts to use (0 = use all). "
+            "When set to N > 0, a random sample of N prompts is drawn from the "
+            "loaded dataset with a fixed seed for reproducibility."
+        ),
+    )
+
+    max_bad_eval_prompts: int = Field(
+        default=0,
+        description=(
+            "Maximum number of bad evaluation prompts to use (0 = use all). "
+            "When set to N > 0, a random sample of N prompts is drawn from the "
+            "loaded dataset with a fixed seed for reproducibility."
+        ),
+    )
+
     good_evaluation_prompts: DatasetSpecification = Field(
         default=DatasetSpecification(
             dataset="mlabonne/harmless_alpaca",
