@@ -624,7 +624,6 @@ def run():
 
     trial_index = 0
     start_index = 0
-    start_time = time.perf_counter()
 
     last_layer_index = len(model.get_layers()) - 1
 
@@ -873,6 +872,7 @@ def run():
         return sum([(1 if t.state == TrialState.COMPLETE else 0) for t in study.trials])
 
     start_index = trial_index = count_completed_trials()
+    start_time = time.perf_counter()
     if start_index > 0:
         print()
         print("Resuming existing study.")
