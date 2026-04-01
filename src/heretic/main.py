@@ -390,16 +390,24 @@ def run():
             choice = prompt_select("How would you like to proceed?", choices)
 
         if choice == "continue" or choice == "finished_headless":
-            # Preserve CLI-only headless settings across checkpoint restoration.
+            # Preserve current run overrides across checkpoint restoration.
             headless_override = settings.headless
             output_dir_override = settings.output_dir
             trial_override = settings.trial
+            n_trials_override = settings.n_trials
             settings = Settings.model_validate_json(
                 existing_study.user_attrs["settings"]
             )
+            if settings.n_trials != n_trials_override:
+                print(
+                    "[yellow]Warning:[/] n_trials from the current config "
+                    f"([bold]{n_trials_override}[/]) differs from the checkpoint "
+                    f"([bold]{settings.n_trials}[/]). Using the current config value."
+                )
             settings.headless = headless_override
             settings.output_dir = output_dir_override
             settings.trial = trial_override
+            settings.n_trials = n_trials_override
         elif choice == "restart":
             os.unlink(study_checkpoint_file)
             backend = JournalFileBackend(study_checkpoint_file, lock_obj=lock_obj)
