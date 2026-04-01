@@ -9,6 +9,8 @@ from .progress import patch_tqdm
 # before any other module imports tqdm.
 patch_tqdm()
 
+import hashlib
+import json
 import logging
 import math
 import os
@@ -71,6 +73,117 @@ from .utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+_RESIDUAL_CACHE_VERSION = 1
+
+
+def _hash_json(data: object) -> str:
+    """Return a stable SHA256 hash for JSON-serializable data."""
+    canonical = json.dumps(
+        data,
+        sort_keys=True,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _hash_prompt_dataset(prompts: list[Prompt]) -> str:
+    """Hash the resolved prompts after all dataset transforms are applied."""
+    hasher = hashlib.sha256()
+    for prompt in prompts:
+        hasher.update(
+            json.dumps(
+                {
+                    "system": prompt.system,
+                    "user": prompt.user,
+                },
+                sort_keys=True,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
+        hasher.update(b"\n")
+    return hasher.hexdigest()
+
+
+def _get_residual_cache_metadata(
+    settings: Settings,
+    model: Model,
+    good_prompts: list[Prompt],
+    bad_prompts: list[Prompt],
+) -> dict[str, object]:
+    """Build cache metadata for reusable residual tensors."""
+    model_config = getattr(model.model, "config", None)
+    return {
+        "cache_version": _RESIDUAL_CACHE_VERSION,
+        "model_id": settings.model,
+        "loaded_model": getattr(model_config, "name_or_path", None),
+        "commit_hash": getattr(model_config, "_commit_hash", None),
+        "quantization": settings.quantization.value,
+        "batch_size": settings.batch_size,
+        "winsorization_quantile": settings.winsorization_quantile,
+        "good_dataset_path": settings.good_prompts.dataset,
+        "good_dataset_checksum": _hash_prompt_dataset(good_prompts),
+        "bad_dataset_path": settings.bad_prompts.dataset,
+        "bad_dataset_checksum": _hash_prompt_dataset(bad_prompts),
+    }
+
+
+def _residual_cache_path(cache_key: str) -> Path:
+    """Return the cache file path for a residual cache key."""
+    return Path("checkpoints") / f"residuals_{cache_key[:16]}.pt"
+
+
+def _try_load_residual_cache(
+    cache_key: str,
+) -> tuple[torch.Tensor, torch.Tensor] | None:
+    """Try loading cached residual tensors. Returns None on cache miss."""
+    path = _residual_cache_path(cache_key)
+    if not path.exists():
+        return None
+
+    try:
+        data = torch.load(path, map_location="cpu", weights_only=True)
+        if not isinstance(data, dict):
+            raise ValueError("Residual cache payload must be a dict")
+        if data.get("cache_key") != cache_key:
+            logger.warning("Residual cache key mismatch in %s, ignoring", path)
+            return None
+
+        good_residuals = data["good_residuals"]
+        bad_residuals = data["bad_residuals"]
+        if not isinstance(good_residuals, torch.Tensor):
+            raise ValueError("good_residuals must be a tensor")
+        if not isinstance(bad_residuals, torch.Tensor):
+            raise ValueError("bad_residuals must be a tensor")
+
+        logger.info("Residual cache loaded from %s", path)
+        return (good_residuals, bad_residuals)
+    except (RuntimeError, KeyError, OSError, EOFError, ValueError):
+        logger.warning("Failed to load residual cache from %s", path, exc_info=True)
+        return None
+
+
+def _save_residual_cache(
+    cache_key: str,
+    metadata: dict[str, object],
+    good_residuals: torch.Tensor,
+    bad_residuals: torch.Tensor,
+) -> None:
+    """Persist residual tensors for faster resume runs."""
+    path = _residual_cache_path(cache_key)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(
+        {
+            "cache_key": cache_key,
+            **metadata,
+            "good_residuals": good_residuals,
+            "bad_residuals": bad_residuals,
+        },
+        path,
+    )
+    logger.info("Residual cache saved to %s", path)
 
 
 def obtain_merge_strategy(settings: Settings) -> str | None:
@@ -566,10 +679,29 @@ def run():
 
     print()
     print("Calculating per-layer refusal directions...")
-    print("* Obtaining residuals for good prompts...")
-    good_residuals = model.get_residuals_batched(good_prompts)
-    print("* Obtaining residuals for bad prompts...")
-    bad_residuals = model.get_residuals_batched(bad_prompts)
+    residual_cache_metadata = _get_residual_cache_metadata(
+        settings,
+        model,
+        good_prompts,
+        bad_prompts,
+    )
+    residual_cache_key = _hash_json(residual_cache_metadata)
+    cached_residuals = _try_load_residual_cache(residual_cache_key)
+    if cached_residuals is not None:
+        good_residuals, bad_residuals = cached_residuals
+        print("* [bold green]Loaded cached[/] residual tensors")
+    else:
+        print("* Residual cache miss")
+        print("* Obtaining residuals for good prompts...")
+        good_residuals = model.get_residuals_batched(good_prompts)
+        print("* Obtaining residuals for bad prompts...")
+        bad_residuals = model.get_residuals_batched(bad_prompts)
+        _save_residual_cache(
+            residual_cache_key,
+            residual_cache_metadata,
+            good_residuals,
+            bad_residuals,
+        )
 
     if settings.direction_method == DirectionMethod.GEOMETRIC_MEDIAN:
         try:

@@ -13,6 +13,7 @@ import torch.linalg as LA
 import torch.nn.functional as F
 from peft import LoraConfig, PeftModel, get_peft_model
 from peft.tuners.lora.layer import Linear
+from rich.progress import track
 from torch import FloatTensor, LongTensor, Tensor
 from torch.nn import Module, ModuleList
 from transformers import (
@@ -727,8 +728,13 @@ class Model:
 
     def get_residuals_batched(self, prompts: list[Prompt]) -> Tensor:
         residuals = []
+        batches = batchify(prompts, self.settings.batch_size)
 
-        for batch in batchify(prompts, self.settings.batch_size):
+        for batch in track(
+            batches,
+            total=len(batches),
+            description="Computing residuals...",
+        ):
             residuals.append(self.get_residuals(batch).cpu())
 
         return torch.cat(residuals, dim=0)
