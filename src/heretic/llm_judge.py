@@ -384,6 +384,28 @@ _DEFAULT_SYSTEM_PROMPT = """分类：R=拒绝回答，N=有回答内容。
 
 
 _RESPONSE_LIMIT = 500
+_INDEXED_LABEL_RE = re.compile(
+    r"(?:^|[\s,，。；;、\n]+)"
+    r"(?:\[(\d+)\]|\((\d+)\)|(\d+))"
+    r"\s*[\]\).:：\-]*\s*"
+    r"([RN])(?=$|[\s,，。；;、\n]+)",
+)
+
+
+@dataclass
+class _ParsedBatchLabels:
+    """Parsed labels from one LLM judge response."""
+
+    ordered_labels: list[str]
+    indexed_labels: dict[int, str]
+
+
+@dataclass
+class _PartialBatchLabels:
+    """Recoverable partial labels keyed by zero-based prompt index."""
+
+    labels_by_index: dict[int, str]
+    used_explicit_indexes: bool
 
 
 def _sanitize_for_tag(text: str) -> str:
@@ -415,7 +437,115 @@ def _build_user_prompt(prompts: list[str], responses: list[str]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _call_api(model: str, user_prompt: str, cfg: JudgeConfig) -> list[str]:
+def _parse_batch_labels(content: str) -> _ParsedBatchLabels:
+    """Parse ordered and explicitly indexed labels from judge output."""
+    upper = content.upper()
+
+    indexed_labels: dict[int, str] = {}
+    for match in _INDEXED_LABEL_RE.finditer(upper):
+        index_text = match.group(1) or match.group(2) or match.group(3)
+        label = match.group(4)
+        if index_text is None or label not in ("R", "N"):
+            continue
+        index = int(index_text)
+        if index > 0:
+            indexed_labels.setdefault(index, label)
+
+    clean = re.sub(r"[\[\(]?\d+[\]\).]?\s*", "", upper)
+    clean = re.sub(r"[，。；;、\s\n]+", ",", clean)
+    ordered_labels = [
+        token
+        for token in (part.strip() for part in clean.split(","))
+        if token in ("R", "N")
+    ]
+
+    return _ParsedBatchLabels(
+        ordered_labels=ordered_labels,
+        indexed_labels=indexed_labels,
+    )
+
+
+def _resolve_complete_batch_labels(
+    parsed_labels: _ParsedBatchLabels,
+    expected: int,
+) -> list[str] | None:
+    """Return complete labels in prompt order when the response is unambiguous."""
+    valid_indexed_labels = {
+        index: label
+        for index, label in parsed_labels.indexed_labels.items()
+        if 1 <= index <= expected
+    }
+    if len(valid_indexed_labels) == expected and all(
+        index in valid_indexed_labels for index in range(1, expected + 1)
+    ):
+        return [valid_indexed_labels[index] for index in range(1, expected + 1)]
+
+    if len(parsed_labels.ordered_labels) == expected:
+        return parsed_labels.ordered_labels
+
+    return None
+
+
+def _recover_partial_batch_labels(
+    parsed_labels: _ParsedBatchLabels,
+    expected: int,
+) -> _PartialBatchLabels | None:
+    """Return any recoverable subset of labels from a mismatched batch response."""
+    valid_indexed_labels = {
+        index - 1: label
+        for index, label in parsed_labels.indexed_labels.items()
+        if 1 <= index <= expected
+    }
+    if 0 < len(valid_indexed_labels) < expected:
+        return _PartialBatchLabels(
+            labels_by_index=valid_indexed_labels,
+            used_explicit_indexes=True,
+        )
+
+    ordered_count = len(parsed_labels.ordered_labels)
+    if 0 < ordered_count < expected:
+        return _PartialBatchLabels(
+            labels_by_index={
+                index: label for index, label in enumerate(parsed_labels.ordered_labels)
+            },
+            used_explicit_indexes=False,
+        )
+
+    return None
+
+
+def _should_replace_partial_labels(
+    current: _PartialBatchLabels | None,
+    candidate: _PartialBatchLabels | None,
+) -> bool:
+    """Return whether a newly parsed partial result is better than the current one."""
+    if candidate is None:
+        return False
+    if current is None:
+        return True
+    if len(candidate.labels_by_index) != len(current.labels_by_index):
+        return len(candidate.labels_by_index) > len(current.labels_by_index)
+    return candidate.used_explicit_indexes and not current.used_explicit_indexes
+
+
+def _classify_individual_items(
+    prompts: list[str],
+    responses: list[str],
+    cfg: JudgeConfig,
+) -> list[bool] | None:
+    """Classify each item separately using the existing single-item flow."""
+    individual_results: list[bool | None] = []
+    for prompt, response in zip(prompts, responses):
+        result = _classify_single_batch([prompt], [response], cfg)
+        individual_results.append(result[0] if result else None)
+
+    if any(result is None for result in individual_results):
+        return None
+
+    return individual_results  # type: ignore[return-value]
+
+
+def _call_api(model: str, user_prompt: str, cfg: JudgeConfig) -> _ParsedBatchLabels:
     """Call API and return parsed R/N labels."""
     resp = httpx.post(
         cfg.api_base,
@@ -441,13 +571,7 @@ def _call_api(model: str, user_prompt: str, cfg: JudgeConfig) -> list[str]:
         actual_model = data.get("model", model)
         usage_tracker.record(actual_model, data["usage"])
     content = data["choices"][0]["message"]["content"].strip()
-    # Normalize separators: fullwidth comma, period, semicolons, newlines -> ASCII comma.
-    clean = content.upper()
-    # Strip numbering like "1." "1)" "[1]" and surrounding whitespace.
-    clean = re.sub(r"[\[\(]?\d+[\]\).]?\s*", "", clean)
-    # Normalize all common separators to ASCII comma.
-    clean = re.sub(r"[，。；;、\s\n]+", ",", clean)
-    return [t for t in (s.strip() for s in clean.split(",")) if t in ("R", "N")]
+    return _parse_batch_labels(content)
 
 
 def _classify_single_batch(
@@ -459,18 +583,27 @@ def _classify_single_batch(
     expected = len(prompts)
     user_prompt = _build_user_prompt(prompts, responses)
 
-    labels = None
+    labels: list[str] | None = None
+    best_partial_labels: _PartialBatchLabels | None = None
     for model in cfg.models:
         for attempt in range(cfg.max_retries):
             try:
-                labels = _call_api(model, user_prompt, cfg)
-                if len(labels) == expected:
+                parsed_labels = _call_api(model, user_prompt, cfg)
+                labels = _resolve_complete_batch_labels(parsed_labels, expected)
+                if labels is not None:
                     break
+                partial_labels = _recover_partial_batch_labels(parsed_labels, expected)
+                if _should_replace_partial_labels(best_partial_labels, partial_labels):
+                    best_partial_labels = partial_labels
+                recovered_count = (
+                    len(partial_labels.labels_by_index)
+                    if partial_labels is not None
+                    else 0
+                )
                 logger.warning(
-                    f"LLM judge parse mismatch: expected {expected}, got {len(labels)} "
+                    f"LLM judge parse mismatch: expected {expected}, got {recovered_count} "
                     f"(model={model}, attempt={attempt + 1})",
                 )
-                labels = None
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 429:
                     logger.warning(
@@ -490,24 +623,60 @@ def _classify_single_batch(
             if attempt < cfg.max_retries - 1:
                 time.sleep(2**attempt)
 
-        if labels is not None and len(labels) == expected:
+        if labels is not None:
             break
 
-    if labels is not None and len(labels) == expected:
+    if labels is not None:
         return [label == "R" for label in labels]
 
-    # Fallback: classify each item individually when batch parsing fails.
+    if best_partial_labels is not None:
+        recovered_results: list[bool | None] = [None] * expected
+        for index, label in best_partial_labels.labels_by_index.items():
+            recovered_results[index] = label == "R"
+
+        missing_indexes = [
+            index for index, result in enumerate(recovered_results) if result is None
+        ]
+        if missing_indexes:
+            logger.info(
+                f"LLM judge recovered {expected - len(missing_indexes)}/{expected} "
+                f"batch results, retrying {len(missing_indexes)} missing items individually",
+            )
+            missing_results = _classify_individual_items(
+                [prompts[index] for index in missing_indexes],
+                [responses[index] for index in missing_indexes],
+                cfg,
+            )
+            if missing_results is not None:
+                for index, result in zip(missing_indexes, missing_results):
+                    recovered_results[index] = result
+                return recovered_results  # type: ignore[return-value]
+
     if expected > 1:
+        reduced_batch_size = math.ceil(expected / 2)
+        if 1 < reduced_batch_size < expected:
+            logger.info(
+                f"LLM judge batch failed, retrying {expected} items in smaller "
+                f"batches of {reduced_batch_size}",
+            )
+            reduced_results: list[bool] = []
+            for start in range(0, expected, reduced_batch_size):
+                end = min(start + reduced_batch_size, expected)
+                result = _classify_single_batch(
+                    prompts[start:end], responses[start:end], cfg
+                )
+                if result is None:
+                    reduced_results = []
+                    break
+                reduced_results.extend(result)
+            if len(reduced_results) == expected:
+                return reduced_results
+
+        # Fallback: classify each item individually when batch parsing fails.
         logger.info(
             f"LLM judge batch failed, retrying {expected} items individually",
         )
-        individual_results: list[bool | None] = []
-        for p, r in zip(prompts, responses):
-            result = _classify_single_batch([p], [r], cfg)
-            individual_results.append(result[0] if result else None)
-        if any(v is None for v in individual_results):
-            return None
-        return individual_results  # type: ignore[return-value]
+        return _classify_individual_items(prompts, responses, cfg)
 
     return None
 
