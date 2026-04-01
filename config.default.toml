@@ -111,6 +111,11 @@ winsorization_quantile = 1.0
 # See docs/thinking-model-compatibility.md for details.
 n_trials = 200
 
+# Number of additional trials to append when resuming an existing study.
+# Useful for extending a finished or interrupted headless run without using
+# the interactive trial-selection menu.
+# n_additional_trials = 50
+
 # Number of trials that use random sampling for the purpose of exploration.
 n_startup_trials = 60
 

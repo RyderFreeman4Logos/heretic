@@ -270,6 +270,14 @@ class Settings(BaseSettings):
         description="Number of abliteration trials to run during optimization.",
     )
 
+    n_additional_trials: int | None = Field(
+        default=None,
+        description=(
+            "Number of additional abliteration trials to append when resuming an existing study."
+        ),
+        gt=0,
+    )
+
     n_startup_trials: int = Field(
         default=60,
         description="Number of trials that use random sampling for the purpose of exploration.",

@@ -432,6 +432,8 @@ def run():
     except IndexError:
         existing_study = None
 
+    resuming_existing_study = False
+
     if existing_study is not None and settings.evaluate_model is None:
         choices = []
 
@@ -486,7 +488,13 @@ def run():
         if not sys.stdin.isatty():
             # Auto-continue in non-interactive mode (e.g. nohup).
             if existing_study.user_attrs["finished"]:
-                if settings.headless:
+                if settings.n_additional_trials is not None:
+                    choice = "continue"
+                    print(
+                        "[green]Auto-continuing finished study to run additional trials "
+                        "(non-interactive mode).[/]"
+                    )
+                elif settings.headless:
                     # Headless mode: skip to post-optimization trial selection.
                     choice = "finished_headless"
                 else:
@@ -508,10 +516,14 @@ def run():
             output_dir_override = settings.output_dir
             trial_override = settings.trial
             n_trials_override = settings.n_trials
+            n_additional_trials_override = settings.n_additional_trials
             settings = Settings.model_validate_json(
                 existing_study.user_attrs["settings"]
             )
-            if settings.n_trials != n_trials_override:
+            if (
+                n_additional_trials_override is None
+                and settings.n_trials != n_trials_override
+            ):
                 print(
                     "[yellow]Warning:[/] n_trials from the current config "
                     f"([bold]{n_trials_override}[/]) differs from the checkpoint "
@@ -520,7 +532,10 @@ def run():
             settings.headless = headless_override
             settings.output_dir = output_dir_override
             settings.trial = trial_override
-            settings.n_trials = n_trials_override
+            settings.n_additional_trials = n_additional_trials_override
+            if n_additional_trials_override is None:
+                settings.n_trials = n_trials_override
+            resuming_existing_study = True
         elif choice == "restart":
             os.unlink(study_checkpoint_file)
             backend = JournalFileBackend(study_checkpoint_file, lock_obj=lock_obj)
@@ -972,6 +987,20 @@ def run():
             f"change thinking_eval_enabled to match."
         )
         sys.exit(1)
+
+    if resuming_existing_study and settings.n_additional_trials is not None:
+        completed_trials = sum(
+            1 for trial in study.trials if trial.state == TrialState.COMPLETE
+        )
+        previous_n_trials = settings.n_trials
+        settings.n_trials += settings.n_additional_trials
+        print()
+        print(
+            "[green]Extending study:[/] "
+            f"increasing target trials from [bold]{previous_n_trials}[/] to "
+            f"[bold]{settings.n_trials}[/] "
+            f"(+{settings.n_additional_trials}, [bold]{completed_trials}[/] already complete)."
+        )
 
     study.set_user_attr("settings", settings.model_dump_json())
     study.set_user_attr("finished", False)
