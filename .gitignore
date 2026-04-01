@@ -27,3 +27,8 @@ wheels/
 
 # Residual plots
 /plots/
+
+# Development artifacts
+/uv.toml
+.test
+*.db
