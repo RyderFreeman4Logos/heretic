@@ -26,6 +26,17 @@ logger = logging.getLogger(__name__)
 _CACHE_VERSION = 1
 
 
+def _hash_json(data: object) -> str:
+    """Return a stable SHA256 hash for JSON-serializable data."""
+    canonical = json.dumps(
+        data,
+        sort_keys=True,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 @dataclass(frozen=True)
 class TrialEvaluation:
     """Structured result from a single trial evaluation."""
@@ -274,40 +285,69 @@ class Evaluator:
         else:
             print(f"* [bold]{total_bad}[/] prompts loaded")
 
-        print("* Counting model refusals...")
-        base_responses = model.get_responses_batched(
-            self.bad_prompts,
-            skip_special_tokens=True,
-        )
+        cache_key = self._compute_refusal_baseline_cache_key()
+        base_responses: list[str] | None = None
+        cached_refusals = None
+        skip_cache_load = self.settings.print_responses
 
-        # Always compute substring baseline (used as fallback even when disabled).
-        self._base_refusals_substring = sum(
-            1 for r in base_responses if self.is_refusal(r)
-        )
+        if skip_cache_load:
+            print("* Refusal baseline cache bypassed (print_responses enabled)")
+        else:
+            cached_refusals = self._try_load_refusal_baseline_cache(cache_key)
 
-        # Try LLM judge for baseline if enabled.
-        if settings.use_llm_judge:
-            flags = self._try_llm_judge(base_responses)
-            if flags is not None:
-                self._base_refusals_llm = sum(flags)
-                self.base_refusals = self._base_refusals_llm
-                if settings.substring_matching:
-                    logger.info(
-                        f"Baseline: LLM judge={self._base_refusals_llm}, substring={self._base_refusals_substring}",
-                    )
+        if cached_refusals is not None:
+            substring_refusals, llm_refusals = cached_refusals
+            self._base_refusals_substring = substring_refusals
+            self._base_refusals_llm = llm_refusals
+            self.base_refusals = (
+                self._base_refusals_llm
+                if self._base_refusals_llm is not None
+                else self._base_refusals_substring
+            )
+            print("* [bold green]Loaded cached[/] refusal baseline")
+        else:
+            if not skip_cache_load:
+                print("* Refusal baseline cache miss")
+            print("* Counting model refusals...")
+            base_responses = model.get_responses_batched(
+                self.bad_prompts,
+                skip_special_tokens=True,
+            )
+
+            # Always compute substring baseline (used as fallback even when disabled).
+            self._base_refusals_substring = sum(
+                1 for r in base_responses if self.is_refusal(r)
+            )
+
+            # Try LLM judge for baseline if enabled.
+            if settings.use_llm_judge:
+                flags = self._try_llm_judge(base_responses)
+                if flags is not None:
+                    self._base_refusals_llm = sum(flags)
+                    self.base_refusals = self._base_refusals_llm
+                    if settings.substring_matching:
+                        logger.info(
+                            f"Baseline: LLM judge={self._base_refusals_llm}, substring={self._base_refusals_substring}",
+                        )
+                    else:
+                        logger.info(
+                            f"Baseline: LLM judge={self._base_refusals_llm} (substring matching disabled)",
+                        )
                 else:
-                    logger.info(
-                        f"Baseline: LLM judge={self._base_refusals_llm} (substring matching disabled)",
+                    self.base_refusals = self._base_refusals_substring
+                    logger.warning(
+                        f"Baseline LLM judge failed, using substring ({self.base_refusals})",
                     )
             else:
                 self.base_refusals = self._base_refusals_substring
-                logger.warning(
-                    f"Baseline LLM judge failed, using substring ({self.base_refusals})",
-                )
-        else:
-            self.base_refusals = self._base_refusals_substring
 
-        if self.settings.print_responses:
+            self._save_refusal_baseline_cache(
+                cache_key,
+                self._base_refusals_substring,
+                self._base_refusals_llm,
+            )
+
+        if base_responses is not None and self.settings.print_responses:
             for prompt, response in zip(self.bad_prompts, base_responses):
                 self._print_response(prompt, response, self.is_refusal(response))
             print()
@@ -362,8 +402,7 @@ class Evaluator:
             "suffix": ds.suffix,
             "system_prompt": resolved_system_prompt,
         }
-        canonical = json.dumps(key_data, sort_keys=True)
-        return hashlib.sha256(canonical.encode()).hexdigest()
+        return _hash_json(key_data)
 
     def _baseline_cache_paths(self, cache_key: str) -> tuple[Path, Path]:
         """Return (pt_path, dat_path) for a given cache key."""
@@ -420,6 +459,137 @@ class Evaluator:
             pt_path,
         )
         logger.info("Sequence KL baseline cache saved to %s", pt_path)
+
+    def _compute_refusal_baseline_cache_key(self) -> str:
+        """Compute a deterministic cache key for baseline refusal counts."""
+        return _hash_json(self._get_refusal_baseline_cache_metadata())
+
+    def _get_refusal_baseline_cache_metadata(self) -> dict[str, object]:
+        """Build cache metadata for the refusal baseline."""
+        model_config = getattr(self.model.model, "config", None)
+        model_identity = {
+            "requested_model": self.settings.model,
+            "loaded_model": getattr(model_config, "name_or_path", None),
+            "commit_hash": getattr(model_config, "_commit_hash", None),
+            "quantization": self.settings.quantization.value,
+            "dtype": str(getattr(self.model.model, "dtype", "")),
+            "max_response_length": self.settings.max_response_length,
+            "response_prefix": self.model.response_prefix,
+        }
+        return {
+            "cache_version": _CACHE_VERSION,
+            "model_hash": _hash_json(model_identity),
+            "eval_prompts_hash": self._hash_prompt_dataset(self.bad_prompts),
+            "judge_config_hash": self._compute_judge_config_hash(),
+            "use_llm_judge": self.settings.use_llm_judge,
+            "substring_matching": self.settings.substring_matching,
+            "refusal_markers": self.settings.refusal_markers,
+        }
+
+    def _hash_prompt_dataset(self, prompts: list[Prompt]) -> str:
+        """Hash the resolved evaluation prompts after sampling and templating."""
+        hasher = hashlib.sha256()
+        for prompt in prompts:
+            hasher.update(
+                json.dumps(
+                    {
+                        "system": prompt.system,
+                        "user": prompt.user,
+                    },
+                    sort_keys=True,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            )
+            hasher.update(b"\n")
+        return hasher.hexdigest()
+
+    def _compute_judge_config_hash(self) -> str:
+        """Hash the effective LLM judge config used for baseline scoring."""
+        if not self.settings.use_llm_judge:
+            return _hash_json({"enabled": False})
+
+        from .llm_judge import get_config
+
+        config = get_config()
+        return _hash_json(
+            {
+                "enabled": True,
+                "api_base": config.api_base,
+                "models": list(config.models),
+                "batch_size": config.batch_size,
+                "concurrency": config.concurrency,
+                "timeout": config.timeout,
+                "max_retries": config.max_retries,
+                "pricing": config.pricing,
+                "system_prompt": config.system_prompt,
+            }
+        )
+
+    def _refusal_baseline_cache_path(self, cache_key: str) -> Path:
+        """Return the JSON path for cached refusal baselines."""
+        stem = f"baseline_refusals_{cache_key[:16]}"
+        return Path("checkpoints") / f"{stem}.json"
+
+    def _try_load_refusal_baseline_cache(
+        self, cache_key: str
+    ) -> tuple[int, int | None] | None:
+        """Try loading a cached refusal baseline. Returns None on cache miss."""
+        path = self._refusal_baseline_cache_path(cache_key)
+        if not path.exists():
+            return None
+
+        try:
+            with path.open(encoding="utf-8") as file:
+                data = json.load(file)
+
+            if data.get("cache_key") != cache_key:
+                logger.warning("Refusal cache key mismatch in %s, ignoring", path)
+                return None
+
+            substring_refusals = data["substring_refusals"]
+            llm_refusals = data.get("llm_refusals")
+            if not isinstance(substring_refusals, int):
+                raise ValueError("substring_refusals must be an int")
+            if llm_refusals is not None and not isinstance(llm_refusals, int):
+                raise ValueError("llm_refusals must be an int or null")
+
+            logger.info("Refusal baseline cache loaded from %s", path)
+            return (substring_refusals, llm_refusals)
+        except (OSError, KeyError, ValueError, json.JSONDecodeError):
+            logger.warning(
+                "Failed to load refusal baseline cache from %s",
+                path,
+                exc_info=True,
+            )
+            return None
+
+    def _save_refusal_baseline_cache(
+        self,
+        cache_key: str,
+        substring_refusals: int,
+        llm_refusals: int | None,
+    ) -> None:
+        """Persist refusal baseline counts for future resume runs."""
+        if self.settings.use_llm_judge and llm_refusals is None:
+            logger.info("Skipping refusal baseline cache save because LLM judge failed")
+            return
+
+        path = self._refusal_baseline_cache_path(cache_key)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        metadata = self._get_refusal_baseline_cache_metadata()
+        data = {
+            "cache_key": cache_key,
+            "base_refusals": (
+                llm_refusals if llm_refusals is not None else substring_refusals
+            ),
+            "substring_refusals": substring_refusals,
+            "llm_refusals": llm_refusals,
+            **metadata,
+        }
+        with path.open("w", encoding="utf-8") as file:
+            json.dump(data, file, ensure_ascii=False, indent=2, sort_keys=True)
+        logger.info("Refusal baseline cache saved to %s", path)
 
     def _try_llm_judge(self, responses: list[str]) -> list[bool] | None:
         """Attempt LLM judge classification. Returns None on failure."""
