@@ -651,6 +651,7 @@ def _classify_single_batch(
                 for index, result in zip(missing_indexes, missing_results):
                     recovered_results[index] = result
                 return recovered_results  # type: ignore[return-value]
+            return None
 
     if expected > 1:
         reduced_batch_size = math.ceil(expected / 2)
@@ -666,11 +667,11 @@ def _classify_single_batch(
                     prompts[start:end], responses[start:end], cfg
                 )
                 if result is None:
-                    reduced_results = []
-                    break
+                    return None
                 reduced_results.extend(result)
             if len(reduced_results) == expected:
                 return reduced_results
+            return reduced_results
 
         # Fallback: classify each item individually when batch parsing fails.
         logger.info(
