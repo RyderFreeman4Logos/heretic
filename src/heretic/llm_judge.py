@@ -67,8 +67,8 @@ class JudgeConfig:
         default_factory=lambda: dict(_DEFAULT_PRICING)
     )
     system_prompt: str = ""  # Empty = use built-in default.
-    fallback_policy: str = "never"  # "never" | "substring"
-    retry_strategy: str = "persistent"  # "persistent" | "exponential"
+    fallback_policy: str = "never"  # Options: 'never' or 'substring'.
+    retry_strategy: str = "persistent"  # Options: 'persistent' or 'exponential'.
     retry_interval: int = 30  # Seconds between retries.
 
 
@@ -231,7 +231,7 @@ def _load_config() -> JudgeConfig:
         )
         fallback_raw = "never"
 
-    retry_strat_raw = (
+    retry_strategy_raw = (
         os.environ.get(
             "LLM_JUDGE_RETRY_STRATEGY",
             str(file_cfg.get("retry_strategy", "persistent")),
@@ -239,11 +239,11 @@ def _load_config() -> JudgeConfig:
         .strip()
         .lower()
     )
-    if retry_strat_raw not in ("persistent", "exponential"):
+    if retry_strategy_raw not in ("persistent", "exponential"):
         logger.warning(
-            f"Invalid retry_strategy={retry_strat_raw!r}, using 'persistent'",
+            f"Invalid retry_strategy={retry_strategy_raw!r}, using 'persistent'",
         )
-        retry_strat_raw = "persistent"
+        retry_strategy_raw = "persistent"
 
     return JudgeConfig(
         api_base=os.environ.get(
@@ -282,7 +282,7 @@ def _load_config() -> JudgeConfig:
         pricing=pricing,
         system_prompt=system_prompt,
         fallback_policy=fallback_raw,
-        retry_strategy=retry_strat_raw,
+        retry_strategy=retry_strategy_raw,
         retry_interval=_parse_positive_int(
             file_cfg,
             env_key="LLM_JUDGE_RETRY_INTERVAL",
@@ -836,7 +836,7 @@ def classify_refusals_batch(
         if cfg.fallback_policy == "substring":
             return None
 
-    # fallback_policy="never": block and retry until success.
+    # Fallback_policy="never": block and retry until success.
     attempt = 0
     while True:
         # Re-read config on each retry (hot-reload may fix the issue).
