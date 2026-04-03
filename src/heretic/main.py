@@ -121,7 +121,6 @@ def _get_residual_cache_metadata(
         "loaded_model": getattr(model_config, "name_or_path", None),
         "commit_hash": getattr(model_config, "_commit_hash", None),
         "quantization": settings.quantization.value,
-        "batch_size": settings.batch_size,
         "winsorization_quantile": settings.winsorization_quantile,
         "good_dataset_path": settings.good_prompts.dataset,
         "good_dataset_checksum": _hash_prompt_dataset(good_prompts),
