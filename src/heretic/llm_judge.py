@@ -67,6 +67,9 @@ class JudgeConfig:
         default_factory=lambda: dict(_DEFAULT_PRICING)
     )
     system_prompt: str = ""  # Empty = use built-in default.
+    fallback_policy: str = "never"  # "never" | "substring"
+    retry_strategy: str = "persistent"  # "persistent" | "exponential"
+    retry_interval: int = 30  # Seconds between retries.
 
 
 # ---------------------------------------------------------------------------
@@ -213,6 +216,35 @@ def _load_config() -> JudgeConfig:
             else:
                 logger.warning(f"System prompt file not found: {prompt_file}")
 
+    # Fallback & retry settings.
+    fallback_raw = (
+        os.environ.get(
+            "LLM_JUDGE_FALLBACK_POLICY",
+            str(file_cfg.get("fallback_policy", "never")),
+        )
+        .strip()
+        .lower()
+    )
+    if fallback_raw not in ("never", "substring"):
+        logger.warning(
+            f"Invalid fallback_policy={fallback_raw!r}, using 'never'",
+        )
+        fallback_raw = "never"
+
+    retry_strat_raw = (
+        os.environ.get(
+            "LLM_JUDGE_RETRY_STRATEGY",
+            str(file_cfg.get("retry_strategy", "persistent")),
+        )
+        .strip()
+        .lower()
+    )
+    if retry_strat_raw not in ("persistent", "exponential"):
+        logger.warning(
+            f"Invalid retry_strategy={retry_strat_raw!r}, using 'persistent'",
+        )
+        retry_strat_raw = "persistent"
+
     return JudgeConfig(
         api_base=os.environ.get(
             "LLM_JUDGE_API_BASE",
@@ -249,6 +281,14 @@ def _load_config() -> JudgeConfig:
         ),
         pricing=pricing,
         system_prompt=system_prompt,
+        fallback_policy=fallback_raw,
+        retry_strategy=retry_strat_raw,
+        retry_interval=_parse_positive_int(
+            file_cfg,
+            env_key="LLM_JUDGE_RETRY_INTERVAL",
+            file_key="retry_interval",
+            default=30,
+        ),
     )
 
 
@@ -682,29 +722,15 @@ def _classify_single_batch(
     return None
 
 
-def classify_refusals_batch(
+def _attempt_classification(
     prompts: list[str],
     responses: list[str],
+    cfg: JudgeConfig,
 ) -> list[bool] | None:
-    """Classify responses as refusals using LLM judge.
+    """Run one full classification attempt across all batches.
 
-    Reads current config on each call (hot-reload via file mtime).
-
-    Args:
-        prompts: User prompt texts.
-        responses: Model response texts (same length as prompts).
-
-    Returns:
-        List of booleans (True = refusal) matching input order,
-        or None if classification fails entirely (caller should fallback).
+    Returns list of booleans on success, or None if any batch failed.
     """
-    cfg = get_config()
-
-    if not cfg.api_key:
-        logger.warning("LLM_JUDGE_API_KEY not set, cannot use LLM judge")
-        return None
-
-    # Build batch index ranges.
     batches = []
     for start in range(0, len(prompts), cfg.batch_size):
         end = min(start + cfg.batch_size, len(prompts))
@@ -751,7 +777,6 @@ def classify_refusals_batch(
             results[start + i] = is_refusal
 
     if failed:
-        # Don't wait for running HTTP requests (bounded by httpx timeout).
         executor.shutdown(wait=False, cancel_futures=True)
         return None
 
@@ -760,5 +785,68 @@ def classify_refusals_batch(
     if any(r is None for r in results):
         return None
 
-    logger.info(f"LLM judge cost this session:\n{usage_tracker.summary()}")
     return results  # type: ignore[return-value]
+
+
+def _compute_retry_delay(cfg: JudgeConfig, attempt: int) -> float:
+    """Return the delay in seconds for the given retry attempt number."""
+    if cfg.retry_strategy == "exponential":
+        return min(cfg.retry_interval * (2**attempt), 300)
+    return float(cfg.retry_interval)
+
+
+def classify_refusals_batch(
+    prompts: list[str],
+    responses: list[str],
+) -> list[bool] | None:
+    """Classify responses as refusals using LLM judge.
+
+    Reads current config on each call (hot-reload via file mtime).
+
+    When ``fallback_policy`` is ``"never"`` (the default), this function
+    blocks and retries until the judge succeeds rather than returning
+    ``None``.  With ``"substring"``, it returns ``None`` on failure so
+    the caller can fall back to substring matching.
+
+    Args:
+        prompts: User prompt texts.
+        responses: Model response texts (same length as prompts).
+
+    Returns:
+        List of booleans (True = refusal) matching input order,
+        or None if classification fails and fallback_policy allows it.
+    """
+    cfg = get_config()
+
+    if not cfg.api_key:
+        logger.warning("LLM_JUDGE_API_KEY not set, cannot use LLM judge")
+        return None
+
+    result = _attempt_classification(prompts, responses, cfg)
+    if result is not None:
+        logger.info(f"LLM judge cost this session:\n{usage_tracker.summary()}")
+        return result
+
+    # Classification failed — decide based on fallback policy.
+    if cfg.fallback_policy == "substring":
+        return None
+
+    # fallback_policy="never": block and retry until success.
+    attempt = 0
+    while True:
+        # Re-read config on each retry (hot-reload may fix the issue).
+        cfg = get_config()
+        delay = _compute_retry_delay(cfg, attempt)
+        attempt += 1
+        logger.warning(
+            "LLM judge unavailable, retrying in %.0fs... (attempt %d)",
+            delay,
+            attempt,
+        )
+        time.sleep(delay)
+
+        result = _attempt_classification(prompts, responses, cfg)
+        if result is not None:
+            logger.info("LLM judge recovered after %d retry attempt(s)", attempt)
+            logger.info(f"LLM judge cost this session:\n{usage_tracker.summary()}")
+            return result

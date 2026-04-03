@@ -170,6 +170,11 @@ refusal_markers = [
 ]
 
 # Use LLM judge for refusal classification instead of substring matching.
+# When enabled, the LLM judge's fallback behavior is controlled by
+# fallback_policy in judge.toml (default: "never" — blocks and retries
+# until the judge succeeds, preventing silent quality degradation).
+# Set fallback_policy = "substring" in judge.toml to restore legacy
+# fall-through behavior.
 use_llm_judge = false
 
 # Whether to use substring matching for refusal detection.
