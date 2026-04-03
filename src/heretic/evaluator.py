@@ -79,16 +79,25 @@ class PendingScore:
 
         Args:
             timeout: Maximum seconds to wait for the LLM judge future.
-                     None means wait indefinitely. On timeout, falls back
-                     to substring matching.
+                     None means wait indefinitely. When fallback_policy
+                     is ``"never"``, timeout is ignored (always waits).
         """
         ev = self._evaluator
 
         refusal_flags: list[bool] | None = None
         if self._judge_future is not None:
+            # When fallback_policy="never", classify_refusals_batch already
+            # retries internally until success, so we always wait indefinitely.
+            from .llm_judge import get_config as _get_judge_config
+
+            judge_cfg = _get_judge_config()
+            effective_timeout = (
+                None if judge_cfg.fallback_policy == "never" else timeout
+            )
+
             wait_start = time.monotonic()
             try:
-                refusal_flags = self._judge_future.result(timeout=timeout)
+                refusal_flags = self._judge_future.result(timeout=effective_timeout)
             except TimeoutError:
                 logger.warning(
                     f"LLM judge timed out after {timeout:.1f}s, falling back to substring",
