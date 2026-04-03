@@ -819,23 +819,33 @@ def classify_refusals_batch(
     cfg = get_config()
 
     if not cfg.api_key:
-        logger.warning("LLM_JUDGE_API_KEY not set, cannot use LLM judge")
-        return None
+        if cfg.fallback_policy != "never":
+            logger.warning("LLM_JUDGE_API_KEY not set, cannot use LLM judge")
+            return None
+        logger.warning(
+            "LLM_JUDGE_API_KEY not set, but fallback_policy='never' — "
+            "entering retry loop (hot-reload the key to proceed)"
+        )
+    else:
+        result = _attempt_classification(prompts, responses, cfg)
+        if result is not None:
+            logger.info(f"LLM judge cost this session:\n{usage_tracker.summary()}")
+            return result
 
-    result = _attempt_classification(prompts, responses, cfg)
-    if result is not None:
-        logger.info(f"LLM judge cost this session:\n{usage_tracker.summary()}")
-        return result
-
-    # Classification failed — decide based on fallback policy.
-    if cfg.fallback_policy == "substring":
-        return None
+        # Classification failed — decide based on fallback policy.
+        if cfg.fallback_policy == "substring":
+            return None
 
     # fallback_policy="never": block and retry until success.
     attempt = 0
     while True:
         # Re-read config on each retry (hot-reload may fix the issue).
         cfg = get_config()
+        if cfg.fallback_policy == "substring":
+            logger.warning(
+                "Fallback policy hot-reloaded to 'substring', aborting retries"
+            )
+            return None
         delay = _compute_retry_delay(cfg, attempt)
         attempt += 1
         logger.warning(
@@ -844,6 +854,10 @@ def classify_refusals_batch(
             attempt,
         )
         time.sleep(delay)
+
+        if not cfg.api_key:
+            logger.warning("LLM_JUDGE_API_KEY still not set, waiting for hot-reload...")
+            continue
 
         result = _attempt_classification(prompts, responses, cfg)
         if result is not None:
