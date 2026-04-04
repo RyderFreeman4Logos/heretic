@@ -250,11 +250,11 @@ def _load_config() -> JudgeConfig:
 
     # Think parameter: env var > TOML > None (disabled).
     think: str | None = None
-    env_think = os.environ.get("LLM_JUDGE_THINK", "")
+    env_think = os.environ.get("LLM_JUDGE_THINK", "").strip().lower()
     if env_think:
         think = env_think
-    elif "think" in file_cfg and file_cfg["think"]:
-        think = str(file_cfg["think"]).lower()
+    elif "think" in file_cfg and file_cfg["think"] is not None:
+        think = str(file_cfg["think"]).strip().lower()
 
     return JudgeConfig(
         api_base=os.environ.get(
