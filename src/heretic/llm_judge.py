@@ -17,6 +17,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from typing import Any
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -63,6 +64,8 @@ class JudgeConfig:
     concurrency: int = _DEFAULT_CONCURRENCY
     timeout: int = _DEFAULT_TIMEOUT
     max_retries: int = _DEFAULT_MAX_RETRIES
+    max_tokens: int = 200  # Max tokens for judge API responses.
+    think: str | bool | None = None  # Thinking parameter for reasoning models.
     pricing: dict[str, tuple[float, float]] = field(
         default_factory=lambda: dict(_DEFAULT_PRICING)
     )
@@ -245,6 +248,21 @@ def _load_config() -> JudgeConfig:
         )
         retry_strategy_raw = "persistent"
 
+    # Think parameter: env var > TOML > None (disabled).
+    # Preserve native types: TOML bool stays bool, env 'true'/'false' → bool,
+    # other env strings kept as str.  JSON serializer outputs bool as true/false.
+    think: str | bool | None = None
+    env_think_raw = os.environ.get("LLM_JUDGE_THINK", "").strip()
+    if env_think_raw:
+        if env_think_raw.lower() == "true":
+            think = True
+        elif env_think_raw.lower() == "false":
+            think = False
+        else:
+            think = env_think_raw
+    elif "think" in file_cfg and file_cfg["think"] is not None:
+        think = file_cfg["think"]
+
     return JudgeConfig(
         api_base=os.environ.get(
             "LLM_JUDGE_API_BASE",
@@ -279,6 +297,13 @@ def _load_config() -> JudgeConfig:
             file_key="max_retries",
             default=_DEFAULT_MAX_RETRIES,
         ),
+        max_tokens=_parse_positive_int(
+            file_cfg,
+            env_key="LLM_JUDGE_MAX_TOKENS",
+            file_key="max_tokens",
+            default=200,
+        ),
+        think=think,
         pricing=pricing,
         system_prompt=system_prompt,
         fallback_policy=fallback_raw,
@@ -587,21 +612,24 @@ def _classify_individual_items(
 
 def _call_api(model: str, user_prompt: str, cfg: JudgeConfig) -> _ParsedBatchLabels:
     """Call API and return parsed R/N labels."""
+    payload: dict[str, Any] = {
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": cfg.system_prompt or _DEFAULT_SYSTEM_PROMPT,
+            },
+            {"role": "user", "content": user_prompt},
+        ],
+        "max_tokens": cfg.max_tokens,
+        "temperature": 0.0,
+    }
+    if cfg.think is not None:
+        payload["think"] = cfg.think
     resp = httpx.post(
         cfg.api_base,
         headers={"Authorization": f"Bearer {cfg.api_key}"},
-        json={
-            "model": model,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": cfg.system_prompt or _DEFAULT_SYSTEM_PROMPT,
-                },
-                {"role": "user", "content": user_prompt},
-            ],
-            "max_tokens": 200,
-            "temperature": 0.0,
-        },
+        json=payload,
         timeout=cfg.timeout,
     )
     resp.raise_for_status()
