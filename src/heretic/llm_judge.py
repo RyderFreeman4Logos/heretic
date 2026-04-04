@@ -17,6 +17,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from typing import Any
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -253,7 +254,7 @@ def _load_config() -> JudgeConfig:
     if env_think:
         think = env_think
     elif "think" in file_cfg and file_cfg["think"]:
-        think = str(file_cfg["think"])
+        think = str(file_cfg["think"]).lower()
 
     return JudgeConfig(
         api_base=os.environ.get(
@@ -604,7 +605,7 @@ def _classify_individual_items(
 
 def _call_api(model: str, user_prompt: str, cfg: JudgeConfig) -> _ParsedBatchLabels:
     """Call API and return parsed R/N labels."""
-    payload: dict = {
+    payload: dict[str, Any] = {
         "model": model,
         "messages": [
             {
