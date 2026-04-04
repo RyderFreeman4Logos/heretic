@@ -825,6 +825,7 @@ def _classify_single_batch(
             persistent_attempt,
         )
         time.sleep(delay)
+        cfg = get_config()
 
 
 def _attempt_classification(
