@@ -601,13 +601,22 @@ def _classify_individual_items(
     """Classify each item separately using the existing single-item flow."""
     individual_results: list[bool | None] = []
     for prompt, response in zip(prompts, responses):
-        result = _classify_single_batch([prompt], [response], cfg)
+        result = _classify_single_batch([prompt], [response], cfg, is_split=True)
         individual_results.append(result[0] if result else None)
 
     if any(result is None for result in individual_results):
         return None
 
     return individual_results  # type: ignore[return-value]
+
+
+# HTTP status codes considered transient (worth retrying).
+_TRANSIENT_HTTP_CODES = frozenset({408, 429, 500, 502, 503, 504})
+
+
+def _is_transient_http_error(status_code: int) -> bool:
+    """Return True if the HTTP error is transient and worth retrying."""
+    return status_code in _TRANSIENT_HTTP_CODES
 
 
 def _call_api(model: str, user_prompt: str, cfg: JudgeConfig) -> _ParsedBatchLabels:
@@ -646,108 +655,177 @@ def _classify_single_batch(
     prompts: list[str],
     responses: list[str],
     cfg: JudgeConfig,
+    *,
+    is_split: bool = False,
 ) -> list[bool] | None:
-    """Classify a single batch with model fallback."""
+    """Classify a single batch with model fallback.
+
+    When ``is_split`` is False (top-level batch) and ``retry_strategy`` is
+    ``'persistent'``, the function restarts from the full batch size after
+    all models and splits are exhausted, instead of returning None.  Split
+    sub-batches (``is_split=True``) always bubble up None on failure so
+    the parent can decide.
+    """
     expected = len(prompts)
     user_prompt = _build_user_prompt(prompts, responses)
+    persistent_attempt = 0
 
-    labels: list[str] | None = None
-    best_partial_labels: _PartialBatchLabels | None = None
-    for model in cfg.models:
-        for attempt in range(cfg.max_retries):
-            try:
-                parsed_labels = _call_api(model, user_prompt, cfg)
-                labels = _resolve_complete_batch_labels(parsed_labels, expected)
-                if labels is not None:
-                    break
-                partial_labels = _recover_partial_batch_labels(parsed_labels, expected)
-                if _should_replace_partial_labels(best_partial_labels, partial_labels):
-                    best_partial_labels = partial_labels
-                recovered_count = (
-                    len(partial_labels.labels_by_index)
-                    if partial_labels is not None
-                    else 0
-                )
-                logger.warning(
-                    f"LLM judge parse mismatch: expected {expected}, got {recovered_count} "
-                    f"(model={model}, attempt={attempt + 1})",
-                )
-            except httpx.HTTPStatusError as e:
-                if e.response.status_code == 429:
-                    logger.warning(
-                        f"LLM judge quota exceeded for {model}, trying next model",
+    while True:
+        labels: list[str] | None = None
+        best_partial_labels: _PartialBatchLabels | None = None
+        for model in cfg.models:
+            for attempt in range(cfg.max_retries):
+                try:
+                    parsed_labels = _call_api(model, user_prompt, cfg)
+                    labels = _resolve_complete_batch_labels(parsed_labels, expected)
+                    if labels is not None:
+                        break
+                    partial_labels = _recover_partial_batch_labels(
+                        parsed_labels, expected
                     )
-                    break  # Skip retries, try next model.
-                logger.warning(
-                    f"LLM judge HTTP error: {e} (model={model}, attempt={attempt + 1})",
-                )
-                labels = None
-            except Exception as e:
-                logger.warning(
-                    f"LLM judge error: {e} (model={model}, attempt={attempt + 1})",
-                )
-                labels = None
+                    if _should_replace_partial_labels(
+                        best_partial_labels, partial_labels
+                    ):
+                        best_partial_labels = partial_labels
+                    recovered_count = (
+                        len(partial_labels.labels_by_index)
+                        if partial_labels is not None
+                        else 0
+                    )
+                    logger.warning(
+                        f"LLM judge parse mismatch: expected {expected}, "
+                        f"got {recovered_count} "
+                        f"(model={model}, attempt={attempt + 1})",
+                    )
+                except httpx.HTTPStatusError as e:
+                    status = e.response.status_code
+                    if not _is_transient_http_error(status):
+                        # Permanent error (400, 401, 403, 404, etc.) —
+                        # skip retries and move to next model.
+                        logger.warning(
+                            f"LLM judge permanent HTTP {status} for {model}, "
+                            f"trying next model",
+                        )
+                        break
+                    if status == 429:
+                        logger.warning(
+                            f"LLM judge quota exceeded for {model}, trying next model",
+                        )
+                        break  # Skip retries, try next model.
+                    logger.warning(
+                        f"LLM judge HTTP error: {e} "
+                        f"(model={model}, attempt={attempt + 1})",
+                    )
+                    labels = None
+                except httpx.RequestError as e:
+                    # Transient network error (connection refused, timeout, etc.)
+                    logger.warning(
+                        f"LLM judge network error: {e} "
+                        f"(model={model}, attempt={attempt + 1})",
+                    )
+                    labels = None
+                except Exception as e:
+                    logger.warning(
+                        f"LLM judge error: {e} (model={model}, attempt={attempt + 1})",
+                    )
+                    labels = None
 
-            if attempt < cfg.max_retries - 1:
-                time.sleep(2**attempt)
+                if attempt < cfg.max_retries - 1:
+                    time.sleep(2**attempt)
+
+            if labels is not None:
+                break
 
         if labels is not None:
-            break
+            return [label == "R" for label in labels]
 
-    if labels is not None:
-        return [label == "R" for label in labels]
+        if best_partial_labels is not None:
+            recovered_results: list[bool | None] = [None] * expected
+            for index, label in best_partial_labels.labels_by_index.items():
+                recovered_results[index] = label == "R"
 
-    if best_partial_labels is not None:
-        recovered_results: list[bool | None] = [None] * expected
-        for index, label in best_partial_labels.labels_by_index.items():
-            recovered_results[index] = label == "R"
+            missing_indexes = [
+                index
+                for index, result in enumerate(recovered_results)
+                if result is None
+            ]
+            if missing_indexes:
+                logger.info(
+                    f"LLM judge recovered "
+                    f"{expected - len(missing_indexes)}/{expected} "
+                    f"batch results, retrying {len(missing_indexes)} "
+                    f"missing items individually",
+                )
+                missing_results = _classify_individual_items(
+                    [prompts[index] for index in missing_indexes],
+                    [responses[index] for index in missing_indexes],
+                    cfg,
+                )
+                if missing_results is not None:
+                    for index, result in zip(missing_indexes, missing_results):
+                        recovered_results[index] = result
+                    return recovered_results  # type: ignore[return-value]
 
-        missing_indexes = [
-            index for index, result in enumerate(recovered_results) if result is None
-        ]
-        if missing_indexes:
-            logger.info(
-                f"LLM judge recovered {expected - len(missing_indexes)}/{expected} "
-                f"batch results, retrying {len(missing_indexes)} missing items individually",
-            )
-            missing_results = _classify_individual_items(
-                [prompts[index] for index in missing_indexes],
-                [responses[index] for index in missing_indexes],
-                cfg,
-            )
-            if missing_results is not None:
-                for index, result in zip(missing_indexes, missing_results):
-                    recovered_results[index] = result
-                return recovered_results  # type: ignore[return-value]
+                # Partial recovery failed — fall through to split/persistent
+                # logic below instead of returning None immediately.
+
+        if expected > 1:
+            reduced_batch_size = math.ceil(expected / 2)
+            if 1 < reduced_batch_size < expected:
+                logger.info(
+                    f"LLM judge batch failed, retrying {expected} items in "
+                    f"smaller batches of {reduced_batch_size}",
+                )
+                reduced_results: list[bool] = []
+                split_failed = False
+                for start in range(0, expected, reduced_batch_size):
+                    end = min(start + reduced_batch_size, expected)
+                    result = _classify_single_batch(
+                        prompts[start:end],
+                        responses[start:end],
+                        cfg,
+                        is_split=True,
+                    )
+                    if result is None:
+                        split_failed = True
+                        break
+                    reduced_results.extend(result)
+                if not split_failed:
+                    return reduced_results
+
+                # Splits exhausted — fall through to persistent retry below.
+            else:
+                # Fallback: classify each item individually.
+                logger.info(
+                    f"LLM judge batch failed, retrying {expected} items individually",
+                )
+                individual_result = _classify_individual_items(prompts, responses, cfg)
+                if individual_result is not None:
+                    return individual_result
+
+                # Individual classification also failed — fall through.
+
+        # All strategies exhausted for this round.
+        # Sub-batches always return None to let the parent handle retry.
+        if is_split:
             return None
 
-    if expected > 1:
-        reduced_batch_size = math.ceil(expected / 2)
-        if 1 < reduced_batch_size < expected:
-            logger.info(
-                f"LLM judge batch failed, retrying {expected} items in smaller "
-                f"batches of {reduced_batch_size}",
-            )
-            reduced_results: list[bool] = []
-            for start in range(0, expected, reduced_batch_size):
-                end = min(start + reduced_batch_size, expected)
-                result = _classify_single_batch(
-                    prompts[start:end], responses[start:end], cfg
-                )
-                if result is None:
-                    return None
-                reduced_results.extend(result)
-            if len(reduced_results) == expected:
-                return reduced_results
-            return reduced_results
+        # Non-persistent strategies give up after one round.
+        if cfg.retry_strategy != "persistent":
+            return None
 
-        # Fallback: classify each item individually when batch parsing fails.
-        logger.info(
-            f"LLM judge batch failed, retrying {expected} items individually",
+        # Persistent retry: restart from full batch size after a delay.
+        persistent_attempt += 1
+        delay = _compute_retry_delay(cfg, persistent_attempt)
+        logger.warning(
+            "LLM judge batch (%d items) exhausted all models and splits, "
+            "restarting from full batch in %.0fs (persistent attempt %d)",
+            expected,
+            delay,
+            persistent_attempt,
         )
-        return _classify_individual_items(prompts, responses, cfg)
-
-    return None
+        time.sleep(delay)
+        cfg = get_config()
 
 
 def _attempt_classification(
