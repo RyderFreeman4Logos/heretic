@@ -70,6 +70,8 @@ class JudgeConfig:
     fallback_policy: str = "never"  # Options: 'never' or 'substring'.
     retry_strategy: str = "persistent"  # Options: 'persistent' or 'exponential'.
     retry_interval: int = 30  # Seconds between retries.
+    max_tokens: int = 200  # Max tokens for judge API responses.
+    think: str | None = None  # Thinking parameter for reasoning models.
 
 
 # ---------------------------------------------------------------------------
@@ -245,6 +247,14 @@ def _load_config() -> JudgeConfig:
         )
         retry_strategy_raw = "persistent"
 
+    # Think parameter: env var > TOML > None (disabled).
+    think: str | None = None
+    env_think = os.environ.get("LLM_JUDGE_THINK", "")
+    if env_think:
+        think = env_think
+    elif "think" in file_cfg and file_cfg["think"]:
+        think = str(file_cfg["think"])
+
     return JudgeConfig(
         api_base=os.environ.get(
             "LLM_JUDGE_API_BASE",
@@ -289,6 +299,13 @@ def _load_config() -> JudgeConfig:
             file_key="retry_interval",
             default=30,
         ),
+        max_tokens=_parse_positive_int(
+            file_cfg,
+            env_key="LLM_JUDGE_MAX_TOKENS",
+            file_key="max_tokens",
+            default=200,
+        ),
+        think=think,
     )
 
 
@@ -587,21 +604,24 @@ def _classify_individual_items(
 
 def _call_api(model: str, user_prompt: str, cfg: JudgeConfig) -> _ParsedBatchLabels:
     """Call API and return parsed R/N labels."""
+    payload: dict = {
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": cfg.system_prompt or _DEFAULT_SYSTEM_PROMPT,
+            },
+            {"role": "user", "content": user_prompt},
+        ],
+        "max_tokens": cfg.max_tokens,
+        "temperature": 0.0,
+    }
+    if cfg.think is not None:
+        payload["think"] = cfg.think
     resp = httpx.post(
         cfg.api_base,
         headers={"Authorization": f"Bearer {cfg.api_key}"},
-        json={
-            "model": model,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": cfg.system_prompt or _DEFAULT_SYSTEM_PROMPT,
-                },
-                {"role": "user", "content": user_prompt},
-            ],
-            "max_tokens": 200,
-            "temperature": 0.0,
-        },
+        json=payload,
         timeout=cfg.timeout,
     )
     resp.raise_for_status()
