@@ -23,7 +23,7 @@ max_tokens  = 200   # Max tokens for judge API responses.
                     # Thinking models (e.g. Gemma 4) may consume this budget
                     # with reasoning tokens, leaving content empty. Increase
                     # when using such models.
-                    # Env var: LLM_JUDGE_MAX_TOKENS
+                    # Env var: LLM_JUDGE_MAX_TOKENS.
 
 # Optional "think" parameter sent in the API request payload.
 # Some API routers use this to control reasoning/thinking behavior.

@@ -64,6 +64,8 @@ class JudgeConfig:
     concurrency: int = _DEFAULT_CONCURRENCY
     timeout: int = _DEFAULT_TIMEOUT
     max_retries: int = _DEFAULT_MAX_RETRIES
+    max_tokens: int = 200  # Max tokens for judge API responses.
+    think: str | None = None  # Thinking parameter for reasoning models.
     pricing: dict[str, tuple[float, float]] = field(
         default_factory=lambda: dict(_DEFAULT_PRICING)
     )
@@ -71,8 +73,6 @@ class JudgeConfig:
     fallback_policy: str = "never"  # Options: 'never' or 'substring'.
     retry_strategy: str = "persistent"  # Options: 'persistent' or 'exponential'.
     retry_interval: int = 30  # Seconds between retries.
-    max_tokens: int = 200  # Max tokens for judge API responses.
-    think: str | None = None  # Thinking parameter for reasoning models.
 
 
 # ---------------------------------------------------------------------------
@@ -290,6 +290,13 @@ def _load_config() -> JudgeConfig:
             file_key="max_retries",
             default=_DEFAULT_MAX_RETRIES,
         ),
+        max_tokens=_parse_positive_int(
+            file_cfg,
+            env_key="LLM_JUDGE_MAX_TOKENS",
+            file_key="max_tokens",
+            default=200,
+        ),
+        think=think,
         pricing=pricing,
         system_prompt=system_prompt,
         fallback_policy=fallback_raw,
@@ -300,13 +307,6 @@ def _load_config() -> JudgeConfig:
             file_key="retry_interval",
             default=30,
         ),
-        max_tokens=_parse_positive_int(
-            file_cfg,
-            env_key="LLM_JUDGE_MAX_TOKENS",
-            file_key="max_tokens",
-            default=200,
-        ),
-        think=think,
     )
 
 
