@@ -185,6 +185,67 @@ def _save_residual_cache(
     logger.info("Residual cache saved to %s", path)
 
 
+def _get_direction_cache_metadata(
+    settings: Settings,
+    residual_cache_metadata: dict[str, object],
+) -> dict[str, object]:
+    """Build cache metadata for direction vectors (extends residual metadata)."""
+    return {
+        **residual_cache_metadata,
+        "direction_method": settings.direction_method.value,
+        "orthogonalize_direction": settings.orthogonalize_direction,
+    }
+
+
+def _direction_cache_path(cache_key: str) -> Path:
+    """Return the cache file path for a direction cache key."""
+    return Path("checkpoints") / f"directions_{cache_key[:16]}.pt"
+
+
+def _try_load_direction_cache(cache_key: str) -> torch.Tensor | None:
+    """Try loading cached refusal direction vectors. Returns None on cache miss."""
+    path = _direction_cache_path(cache_key)
+    if not path.exists():
+        return None
+
+    try:
+        data = torch.load(path, map_location="cpu", weights_only=True)
+        if not isinstance(data, dict):
+            raise ValueError("Direction cache payload must be a dict")
+        if data.get("cache_key") != cache_key:
+            logger.warning("Direction cache key mismatch in %s, ignoring", path)
+            return None
+
+        directions = data["directions"]
+        if not isinstance(directions, torch.Tensor):
+            raise ValueError("directions must be a tensor")
+
+        logger.info("Direction cache loaded from %s", path)
+        return directions
+    except (RuntimeError, KeyError, OSError, EOFError, ValueError):
+        logger.warning("Failed to load direction cache from %s", path, exc_info=True)
+        return None
+
+
+def _save_direction_cache(
+    cache_key: str,
+    metadata: dict[str, object],
+    directions: torch.Tensor,
+) -> None:
+    """Persist refusal direction vectors for faster resume runs."""
+    path = _direction_cache_path(cache_key)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(
+        {
+            "cache_key": cache_key,
+            **metadata,
+            "directions": directions,
+        },
+        path,
+    )
+    logger.info("Direction cache saved to %s", path)
+
+
 def obtain_merge_strategy(settings: Settings) -> str | None:
     """
     Prompts the user for how to proceed with saving the model.
@@ -700,73 +761,105 @@ def run():
         bad_prompts,
     )
     residual_cache_key = _hash_json(residual_cache_metadata)
-    cached_residuals = _try_load_residual_cache(residual_cache_key)
-    if cached_residuals is not None:
-        good_residuals, bad_residuals = cached_residuals
-        print("* [bold green]Loaded cached[/] residual tensors")
-    else:
-        print("* Residual cache miss")
-        print("* Obtaining residuals for good prompts...")
-        good_residuals = model.get_residuals_batched(good_prompts)
-        print("* Obtaining residuals for bad prompts...")
-        bad_residuals = model.get_residuals_batched(bad_prompts)
-        _save_residual_cache(
-            residual_cache_key,
-            residual_cache_metadata,
-            good_residuals,
-            bad_residuals,
-        )
 
-    if settings.direction_method == DirectionMethod.GEOMETRIC_MEDIAN:
-        try:
-            from geom_median.torch import (  # ty:ignore[unresolved-import]
-                compute_geometric_median,
+    direction_cache_metadata = _get_direction_cache_metadata(
+        settings, residual_cache_metadata
+    )
+    direction_cache_key = _hash_json(direction_cache_metadata)
+    cached_directions = _try_load_direction_cache(direction_cache_key)
+
+    need_residuals = (
+        cached_directions is None
+        or settings.print_residual_geometry
+        or settings.plot_residuals
+    )
+
+    if cached_directions is not None:
+        refusal_directions = cached_directions
+        print("* [bold green]Loaded cached[/] refusal directions")
+    # Fall through: if residuals are still needed for visualization,
+    # they will be loaded below regardless of direction cache status.
+
+    if need_residuals:
+        cached_residuals = _try_load_residual_cache(residual_cache_key)
+        if cached_residuals is not None:
+            good_residuals, bad_residuals = cached_residuals
+            print("* [bold green]Loaded cached[/] residual tensors")
+        else:
+            print("* Residual cache miss")
+            print("* Obtaining residuals for good prompts...")
+            good_residuals = model.get_residuals_batched(good_prompts)
+            print("* Obtaining residuals for bad prompts...")
+            bad_residuals = model.get_residuals_batched(bad_prompts)
+            _save_residual_cache(
+                residual_cache_key,
+                residual_cache_metadata,
+                good_residuals,
+                bad_residuals,
             )
-        except ImportError:
-            raise ImportError(
-                'direction_method = "geometric_median" requires the geom-median package. '
-                "Install it with: uv pip install heretic-llm[research]"
-            ) from None
 
-        def _per_layer_geometric_median(residuals: torch.Tensor) -> torch.Tensor:
-            device = residuals.device
-            return torch.stack(
-                [
-                    compute_geometric_median(residuals[:, i, :].detach().cpu()).median
-                    for i in range(residuals.shape[1])
-                ]
-            ).to(device)
+        if cached_directions is None:
+            if settings.direction_method == DirectionMethod.GEOMETRIC_MEDIAN:
+                try:
+                    from geom_median.torch import (  # ty:ignore[unresolved-import]
+                        compute_geometric_median,
+                    )
+                except ImportError:
+                    raise ImportError(
+                        'direction_method = "geometric_median" requires the geom-median package. '
+                        "Install it with: uv pip install heretic-llm[research]"
+                    ) from None
 
-        good_center = _per_layer_geometric_median(good_residuals)
-        bad_center = _per_layer_geometric_median(bad_residuals)
-    else:
-        good_center = good_residuals.mean(dim=0)
-        bad_center = bad_residuals.mean(dim=0)
+                def _per_layer_geometric_median(
+                    residuals: torch.Tensor,
+                ) -> torch.Tensor:
+                    device = residuals.device
+                    return torch.stack(
+                        [
+                            compute_geometric_median(
+                                residuals[:, i, :].detach().cpu()
+                            ).median
+                            for i in range(residuals.shape[1])
+                        ]
+                    ).to(device)
 
-    refusal_directions = F.normalize(bad_center - good_center, p=2, dim=1)
+                good_center = _per_layer_geometric_median(good_residuals)
+                bad_center = _per_layer_geometric_median(bad_residuals)
+            else:
+                good_center = good_residuals.mean(dim=0)
+                bad_center = bad_residuals.mean(dim=0)
 
-    if settings.orthogonalize_direction:
-        # Implements https://huggingface.co/blog/grimjim/projected-abliteration
-        # Adjust the refusal directions so that only the component that is
-        # orthogonal to the good direction is subtracted during abliteration.
-        good_directions = F.normalize(good_center, p=2, dim=1)
-        projection_vector = torch.sum(refusal_directions * good_directions, dim=1)
-        refusal_directions = (
-            refusal_directions - projection_vector.unsqueeze(1) * good_directions
-        )
-        refusal_directions = F.normalize(refusal_directions, p=2, dim=1)
+            refusal_directions = F.normalize(bad_center - good_center, p=2, dim=1)
 
-    analyzer = Analyzer(settings, model, good_residuals, bad_residuals)
+            if settings.orthogonalize_direction:
+                # Implements https://huggingface.co/blog/grimjim/projected-abliteration
+                # Adjust the refusal directions so that only the component that is
+                # orthogonal to the good direction is subtracted during abliteration.
+                good_directions = F.normalize(good_center, p=2, dim=1)
+                projection_vector = torch.sum(
+                    refusal_directions * good_directions, dim=1
+                )
+                refusal_directions = (
+                    refusal_directions
+                    - projection_vector.unsqueeze(1) * good_directions
+                )
+                refusal_directions = F.normalize(refusal_directions, p=2, dim=1)
 
-    if settings.print_residual_geometry:
-        analyzer.print_residual_geometry()
+            _save_direction_cache(
+                direction_cache_key, direction_cache_metadata, refusal_directions
+            )
 
-    if settings.plot_residuals:
-        analyzer.plot_residuals()
+        analyzer = Analyzer(settings, model, good_residuals, bad_residuals)
 
-    # We don't need the residuals after computing refusal directions.
-    del good_residuals, bad_residuals, analyzer
-    empty_cache()
+        if settings.print_residual_geometry:
+            analyzer.print_residual_geometry()
+
+        if settings.plot_residuals:
+            analyzer.plot_residuals()
+
+        # We don't need the residuals after computing refusal directions.
+        del good_residuals, bad_residuals, analyzer
+        empty_cache()
 
     trial_index = 0
     start_index = 0
