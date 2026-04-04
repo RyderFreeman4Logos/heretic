@@ -65,7 +65,7 @@ class JudgeConfig:
     timeout: int = _DEFAULT_TIMEOUT
     max_retries: int = _DEFAULT_MAX_RETRIES
     max_tokens: int = 200  # Max tokens for judge API responses.
-    think: str | None = None  # Thinking parameter for reasoning models.
+    think: str | bool | None = None  # Thinking parameter for reasoning models.
     pricing: dict[str, tuple[float, float]] = field(
         default_factory=lambda: dict(_DEFAULT_PRICING)
     )
@@ -249,12 +249,19 @@ def _load_config() -> JudgeConfig:
         retry_strategy_raw = "persistent"
 
     # Think parameter: env var > TOML > None (disabled).
-    think: str | None = None
-    env_think = os.environ.get("LLM_JUDGE_THINK", "").strip().lower()
-    if env_think:
-        think = env_think
+    # Preserve native types: TOML bool stays bool, env 'true'/'false' → bool,
+    # other env strings kept as str.  JSON serializer outputs bool as true/false.
+    think: str | bool | None = None
+    env_think_raw = os.environ.get("LLM_JUDGE_THINK", "").strip()
+    if env_think_raw:
+        if env_think_raw.lower() == "true":
+            think = True
+        elif env_think_raw.lower() == "false":
+            think = False
+        else:
+            think = env_think_raw
     elif "think" in file_cfg and file_cfg["think"] is not None:
-        think = str(file_cfg["think"]).strip().lower()
+        think = file_cfg["think"]
 
     return JudgeConfig(
         api_base=os.environ.get(
