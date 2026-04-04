@@ -524,14 +524,11 @@ class Evaluator:
         return _hash_json(
             {
                 "enabled": True,
-                "api_base": config.api_base,
                 "models": list(config.models),
-                "batch_size": config.batch_size,
-                "concurrency": config.concurrency,
-                "timeout": config.timeout,
-                "max_retries": config.max_retries,
-                "pricing": config.pricing,
                 "system_prompt": config.system_prompt,
+                "max_tokens": config.max_tokens,
+                "think": config.think,
+                "fallback_policy": config.fallback_policy,
             }
         )
 
