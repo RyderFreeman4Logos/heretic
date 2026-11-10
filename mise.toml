@@ -1,5 +1,5 @@
 [env]
-UV_CACHE_DIR = "/tmp/uv-cache"
+UV_CACHE_DIR = "{{env.HOME}}/tmp/uv-cache"
 
 [tools]
 uv = "latest"

@@ -2,6 +2,7 @@
 # Copyright (C) 2025-2026  Philipp Emanuel Weidmann <pew@worldwidemann.com> + contributors
 
 from enum import Enum
+from pathlib import Path
 from typing import Dict
 
 from pydantic import BaseModel, Field, model_validator
@@ -96,7 +97,25 @@ class BenchmarkSpecification(BaseModel):
     )
 
 
+class VllmSettings(BaseModel):
+    endpoint: str = Field(description="Dedicated trusted vLLM /v1 endpoint.")
+    local_adapter_dir: Path = Field(
+        description="Existing private shared snapshot directory."
+    )
+    server_adapter_dir: str = Field(
+        description="Absolute mount path of that directory inside vLLM."
+    )
+    api_key: str | None = Field(default=None, exclude=True)
+    timeout: float = Field(default=300, gt=0, le=3600)
+    batch_size: int = Field(default=128, gt=0, le=4096)
+
+
 class Settings(BaseSettings):
+    vllm: VllmSettings | None = Field(
+        default=None,
+        exclude=True,
+        description="Experimental opt-in Phase B LoRA generation; never starts an engine.",
+    )
     model: str = Field(description="Hugging Face model ID, or path to model on disk.")
 
     model_commit: str | None = Field(
@@ -611,6 +630,14 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _validate_thinking_eval(self) -> "Settings":
+        if self.vllm is not None and (
+            self.quantization != QuantizationMethod.NONE
+            or self.evaluate_model is not None
+        ):
+            raise ValueError(
+                "experimental vLLM generation requires unquantized PEFT trials and "
+                "does not support evaluate_model; use the default HF backend otherwise"
+            )
         if self.thinking_eval_enabled and self.thinking_eval_prompts is None:
             raise ValueError(
                 "thinking_eval_enabled is true but thinking_eval_prompts is not configured. "
