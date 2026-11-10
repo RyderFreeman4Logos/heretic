@@ -4,6 +4,7 @@
 import math
 from contextlib import suppress
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Type, cast
 
 import bitsandbytes as bnb
@@ -34,6 +35,7 @@ from transformers.generation import (
 from .config import QuantizationMethod, RowNormalization, Settings
 from .system import empty_cache
 from .utils import Prompt, batchify, print
+from .vllm_backend import VllmBackend, VllmBackendError
 
 
 def get_model_class(
@@ -73,6 +75,18 @@ class Model:
 
     def __init__(self, settings: Settings):
         self.settings = settings
+        backend = settings.vllm
+        self.vllm_backend = (
+            VllmBackend(
+                backend.endpoint,
+                backend.local_adapter_dir,
+                backend.server_adapter_dir,
+                timeout=backend.timeout,
+                api_key=backend.api_key,
+            )
+            if backend is not None
+            else None
+        )
         self.response_prefix = ""
         self.thinking_profile: ThinkingProfile | None = None
         self.needs_reload = False
@@ -603,12 +617,11 @@ class Model:
                     weight_A.data = lora_A.to(weight_A.dtype)
                     weight_B.data = lora_B.to(weight_B.dtype)
 
-    def generate(
+    def _format_generation_prompts(
         self,
         prompts: list[Prompt],
         enable_thinking: bool | None = None,
-        **kwargs: Any,
-    ) -> tuple[BatchEncoding, GenerateDecoderOnlyOutput | LongTensor]:
+    ) -> list[str]:
         chats = [
             [
                 {"role": "system", "content": prompt.system},
@@ -639,6 +652,16 @@ class Model:
             chat_prompts = [
                 prompt + self.settings.response_prefix for prompt in chat_prompts
             ]
+
+        return chat_prompts
+
+    def generate(
+        self,
+        prompts: list[Prompt],
+        enable_thinking: bool | None = None,
+        **kwargs: Any,
+    ) -> tuple[BatchEncoding, GenerateDecoderOnlyOutput | LongTensor]:
+        chat_prompts = self._format_generation_prompts(prompts, enable_thinking)
 
         inputs = self.tokenizer(
             chat_prompts,
@@ -684,6 +707,47 @@ class Model:
         skip_special_tokens: bool = False,
         enable_thinking: bool | None = None,
     ) -> list[str]:
+        if self.vllm_backend is not None:
+            if (
+                getattr(self.model, "is_loaded_in_4bit", False)
+                or getattr(self.model, "is_loaded_in_8bit", False)
+                or getattr(self.model.config, "quantization_config", None)
+            ):
+                raise VllmBackendError(
+                    "experimental vLLM generation does not support quantized base weights"
+                )
+            if not isinstance(self.model, PeftModel) or self.model.active_adapters != [
+                "default"
+            ]:
+                raise VllmBackendError(
+                    "vLLM generation requires the current default PEFT adapter"
+                )
+            chat_prompts = self._format_generation_prompts(prompts, enable_thinking)
+            prompt_ids = cast(
+                list[list[int]], self.tokenizer(chat_prompts)["input_ids"]
+            )
+            eos = self.model.generation_config.eos_token_id
+            eos_ids = [eos] if isinstance(eos, int) else list(eos or [])
+
+            def export_adapter(path: Path) -> None:
+                self.model.save_pretrained(
+                    str(path), safe_serialization=True, selected_adapters=["default"]
+                )
+
+            backend = self.settings.vllm
+            assert backend is not None
+            outputs = self.vllm_backend.generate(
+                prompt_ids,
+                export_adapter,
+                base_model=self.settings.model,
+                max_tokens=self.settings.max_response_length,
+                eos_token_ids=eos_ids,
+                batch_size=backend.batch_size,
+            )
+            return self.tokenizer.batch_decode(
+                outputs, skip_special_tokens=skip_special_tokens
+            )
+
         responses = []
 
         for batch in batchify(prompts, self.settings.batch_size):
